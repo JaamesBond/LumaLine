@@ -203,8 +203,13 @@ docs/                   design, feasibility, GTM
 - 🚧 **Before GA earnings:** device-code `lumaline login` (so installs attribute + earn), real
   advertiser onboarding, Stripe Connect payouts, legal (ToS / privacy / ad policy), a branded feed
   domain, and an npm registry publish (`0.1.0`, superseding the `0.0.1` reservation stub).
-- ❓ **Being verified in the wild:** whether Claude Code's status bar forwards OSC-8 hyperlinks.
-  CPVA (views) is dependable today; CPC (clicks) is upside until confirmed on real terminals.
+- ⚠️ **Clickable links are terminal-dependent (open upstream bug):** the status-bar link is clickable
+  in **IDE terminals** (VS Code/Cursor) but currently **not in standalone terminal emulators** (foot,
+  kitty, Konsole, iTerm2, Alacritty) — an open Claude Code regression
+  ([#26356](https://github.com/anthropics/claude-code/issues/26356), since v2.1.3; the line's bytes
+  are a correct OSC-8 link, but Claude Code mangles the passthrough to real terminals). **Views/CPVA
+  are unaffected** and are the dependable model; **clicks/CPC** work in IDE terminals today and will
+  work everywhere once the upstream bug is fixed.
 
 We'd rather under-promise here than oversell. [Track progress / get launch access →](https://luma-line.lovable.app)
 
