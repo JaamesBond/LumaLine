@@ -24,7 +24,7 @@
 //     creative (click_resolve), never asserted by this function or echoed from the request.
 //   * verify_jwt = false (this is the only public entrypoint; see supabase/config.toml).
 import { corsHeaders, json } from "../_shared/cors.ts";
-import { SUPABASE_URL, forwardRpc } from "../_shared/jwt.ts";
+import { forwardRpc } from "../_shared/jwt.ts";
 
 // Sentinel identity — matches supabase/seed.prod.sql. Not a secret (it is the "anon, never
 // paid" publisher); env-overridable for flexibility, defaults to the seeded UUIDs.
@@ -129,8 +129,11 @@ Deno.serve(async (req) => {
     if (ad.house || !ad.line) return json({ error: "no fill" }, 503);
 
     const windowId = rpc.window_id as string;
-    // Tracked, gross=0 click: opaque single-use token -> click fn -> 302 to booked dest.
-    const clickUrl = `${SUPABASE_URL}/functions/v1/click?token=${rpc.click_token}`;
+    // Self-promo MVP: the SIGNED link points straight at the advertiser site — clean, and the
+    // client shows no raw URL. No open-redirect risk: this URL is Ed25519-signed by us (not
+    // attacker-supplied) and the client re-validates http(s). Tracked, gross=0 CPC via the
+    // `click` fn (opaque token -> 302) returns at GA behind a branded domain. Env-overridable.
+    const clickUrl = Deno.env.get("LUMALINE_SELFPROMO_DEST") ?? "https://luma-line.lovable.app";
     // Build the signed string ONCE and transport it verbatim. JSON.parse(adData).windowId
     // MUST equal windowId or the client refuses (window.mjs:41).
     const adData = JSON.stringify({ windowId, line: ad.line, label: ad.label ?? "sponsored", clickUrl });

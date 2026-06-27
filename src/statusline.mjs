@@ -29,7 +29,6 @@ const audit = (evt) => appendFileSync(AUDIT, JSON.stringify({ ts: now, ...evt })
 
 // OSC 8 hyperlink: makes the wrapped text clickable in supporting terminals.
 const osc8 = (url, text) => `\x1b]8;;${url}\x07${text}\x1b]8;;\x07`;
-const shortUrl = (u) => { try { const x = new URL(u); return (x.host + x.pathname).replace(/\/$/, ''); } catch { return u; } };
 
 // A control char in the URL could break out of the OSC-8 sequence and inject terminal
 // codes. Detect via char codes (keeps this source file ASCII-only).
@@ -102,12 +101,10 @@ async function main() {
   if (r.verifyFail) { audit({ event: 'verify_fail' }); saveJson(STATE, null); return base; }
   saveJson(STATE, r.state);
   if (!r.status) return base;
+  // The whole labeled line IS the hyperlink — clean text, no raw URL shown. The "sponsored"
+  // label stays (honest-disclosure invariant); a click opens the advertiser's site directly.
   const safe = (r.clickUrl && HYPERLINKS) ? safeClickUrl(r.clickUrl) : null;
-  if (safe) {
-    const labeled = r.status.replace(/sponsored/, `→ ${shortUrl(safe)}  ·  sponsored`);
-    return osc8(safe, labeled);
-  }
-  return r.status;
+  return safe ? osc8(safe, r.status) : r.status;
 }
 
 main()

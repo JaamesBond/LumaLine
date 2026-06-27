@@ -36,9 +36,9 @@ No bundle patching. No silent updates. No security trade-offs.
 ★ LumaLine — honest, signed ads for Claude Code  ·  sponsored (5s)
 ```
 
-> One labeled line, Ed25519-signed before it ever renders. Clickable (OSC-8) — the link routes
-> through LumaLine's click tracker to the advertiser; disable links any time with
-> `LUMALINE_HYPERLINKS=0`.
+> One labeled line, Ed25519-signed before it ever renders. The whole line is an OSC-8 hyperlink
+> straight to the advertiser's site (the URL is signed, so it can't be tampered with); no raw URL
+> clutters the line. Disable links any time with `LUMALINE_HYPERLINKS=0`.
 
 **Public beta is live now.** The signed feed currently serves LumaLine's own self-promo line so
 you can install it and watch the whole trust loop run for real. **Per-publisher *earnings* unlock
