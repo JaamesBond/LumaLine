@@ -403,6 +403,13 @@ verify_jwt = true
 [functions.click]
 verify_jwt = false
 
+# lumaline-feed — the launch MVP's single PUBLIC entrypoint: the anonymous, signed,
+# never-billed self-promo feed. It mints a short-lived sentinel device JWT server-side and
+# forwards to the verified window RPCs, so it MUST skip the gateway JWT check (callers are
+# unauthenticated CLIs). Trust-critical logic stays in the RPCs; this fn only signs + reshapes.
+[functions.lumaline-feed]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327

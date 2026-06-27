@@ -1,0 +1,18 @@
+# The published CLI ships ONLY what the client needs: bin/, the client-side src/ modules,
+# the bundled PUBLIC verify key, and README. Everything below is repo-only.
+#
+# (package.json#files already allowlists bin/src/README; these patterns prune within src/.)
+
+# Reference HTTP backend — NOT imported by the client (statusline/window/install/config/lib).
+# It lives here for the demos + integration tests; it must never ship (it references a
+# private signing key param, and shipping it would bloat the supply-chain surface).
+src/server/
+
+# Stray favicon (~329 KB). GitHub renders assets/ at the repo root; the npm package needs no image.
+src/assets/
+
+# Never ship dev/keys-on-disk, secrets, or scratch.
+src/keys/private.pem
+.secrets/
+.env
+.env.local

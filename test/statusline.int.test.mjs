@@ -27,7 +27,12 @@ after(() => { ctx.server.close(); rmSync(home, { recursive: true, force: true })
 // block the event loop so the in-process HTTP server could never answer the child.
 function tick(tokens) {
   const stdin = JSON.stringify({ model: { display_name: 'Opus 4.8' }, context_window: { total_input_tokens: tokens } });
-  const env = { ...process.env, LUMALINE_HOME: home, LUMALINE_FEED: `http://127.0.0.1:${ctx.port}`, LUMALINE_HYPERLINKS: '0' };
+  // A prod public key now ships at src/keys/public.pem, so config prefers the bundled key
+  // unless LUMALINE_PUBKEY is set. Point the client at THIS test's dev key explicitly.
+  const env = {
+    ...process.env, LUMALINE_HOME: home, LUMALINE_FEED: `http://127.0.0.1:${ctx.port}`,
+    LUMALINE_PUBKEY: path.join(home, 'keys', 'public.pem'), LUMALINE_HYPERLINKS: '0',
+  };
   return new Promise((resolve) => {
     const child = spawn('node', [STATUSLINE], { env });
     let out = '';

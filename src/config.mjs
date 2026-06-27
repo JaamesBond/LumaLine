@@ -22,9 +22,12 @@ export const BACKEND_LOG = path.join(LUMALINE_HOME, 'backend-impressions.log');
 const bundledPub = fileURLToPath(new URL('./keys/public.pem', import.meta.url));
 export const PUB = env.LUMALINE_PUBKEY || (existsSync(bundledPub) ? bundledPub : path.join(KEYS, 'public.pem'));
 
-// Feed endpoint.
+// Feed endpoint. Defaults to the live remote signed self-promo feed (the lumaline-feed
+// edge function on the prod Supabase project); override with LUMALINE_FEED for local dev
+// (e.g. http://127.0.0.1:8787 against poc/backend, or a Supabase preview branch URL).
 export const PORT = Number(env.LUMALINE_PORT || 8787);
-export const FEED_BASE = env.LUMALINE_FEED || `http://127.0.0.1:${PORT}`;
+export const FEED_BASE = env.LUMALINE_FEED ||
+  'https://prmsonskzrubqsazmpwd.supabase.co/functions/v1/lumaline-feed';
 
 // Claude Code settings file. Honors CLAUDE_CONFIG_DIR; otherwise ~/.claude on
 // every OS (Claude Code uses the same user-scope location cross-platform).
@@ -33,7 +36,10 @@ export const CLAUDE_SETTINGS = env.CLAUDE_CONFIG_DIR
   : path.join(home, '.claude', 'settings.json');
 
 export const CACHE_TTL_MS = 30_000;
-export const FETCH_TIMEOUT_MS = 800;
+// Remote edge cold-start + Ed25519 signing measured ~1.6s on a cold tick; 800ms (the old
+// localhost-tuned value) would abort the first tick after idle and show nothing even when
+// wired right. 3s gives margin; still env-tunable for fast localhost dev.
+export const FETCH_TIMEOUT_MS = Number(env.LUMALINE_FETCH_TIMEOUT_MS || 3000);
 export const COOLDOWN_MS = 15_000;
 export const REFRESH_SECONDS = Number(env.LUMALINE_REFRESH || 1);   // statusLine.refreshInterval
 export const HYPERLINKS = env.LUMALINE_HYPERLINKS !== '0';          // OSC 8 clickable links (on by default)

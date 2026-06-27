@@ -3,12 +3,20 @@
   "version": "0.1.0",
   "description": "Trust-first sponsored status line for Claude Code. Official statusLine only — signed feed, no bundle patching, no CSP changes.",
   "type": "module",
+  "private": true,
+  "//private": "Hard guard against an accidental `npm publish` during the GitHub beta. The beta installs via `npm i -g github:JaamesBond/LumaLine` (git, unaffected by this flag). REMOVE `private` at GA to publish 0.1.0 to the npm registry (supersedes the 0.0.1 reservation stub).",
   "bin": {
     "lumaline": "bin/lumaline.mjs"
   },
   "files": [
     "bin",
-    "src",
+    "src/statusline.mjs",
+    "src/install.mjs",
+    "src/uninstall.mjs",
+    "src/config.mjs",
+    "src/client",
+    "src/lib",
+    "src/keys/public.pem",
     "README.md"
   ],
   "engines": {
@@ -16,6 +24,7 @@
   },
   "scripts": {
     "test": "node --test",
+    "prepublishOnly": "node --test",
     "demo": "node poc/demo-session.mjs",
     "demo:plain": "node poc/demo-session.mjs --plain",
     "demo:plumbing": "node poc/demo.mjs"
