@@ -15,10 +15,11 @@
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import {
   LUMALINE_HOME, PUB, STATE, AUDIT, FEED_BASE,
-  FETCH_TIMEOUT_MS, COOLDOWN_MS, HYPERLINKS, SHOW_URL,
+  FETCH_TIMEOUT_MS, COOLDOWN_MS, HYPERLINKS, SHOW_URL, COLOR, COLOR_RESET,
 } from './config.mjs';
 import { step } from './client/window.mjs';
 import { verifyData } from './lib/crypto.mjs';
+import { safeClickUrl } from './lib/url.mjs';
 
 mkdirSync(LUMALINE_HOME, { recursive: true });
 const now = Date.now();
@@ -27,24 +28,10 @@ const loadJson = (p, def) => { try { return JSON.parse(readFileSync(p, 'utf8'));
 const saveJson = (p, o) => writeFileSync(p, JSON.stringify(o));
 const audit = (evt) => appendFileSync(AUDIT, JSON.stringify({ ts: now, ...evt }) + '\n');
 
-// OSC 8 hyperlink: makes the wrapped text clickable in supporting terminals.
+// OSC 8 hyperlink: makes the wrapped text clickable in supporting terminals. URL safety
+// (absolute http(s), no control chars) lives in ./lib/url.mjs — used for both the visible
+// inline URL (built in client/window.mjs) and this OSC-8 click target.
 const osc8 = (url, text) => `\x1b]8;;${url}\x07${text}\x1b]8;;\x07`;
-
-// A control char in the URL could break out of the OSC-8 sequence and inject terminal
-// codes. Detect via char codes (keeps this source file ASCII-only).
-function hasControlChars(s) {
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    if (c < 0x20 || c === 0x7f) return true;
-  }
-  return false;
-}
-// Only ever emit a hyperlink for a validated absolute http(s) URL with no control chars.
-function safeClickUrl(u) {
-  if (typeof u !== 'string' || hasControlChars(u)) return null;
-  try { const x = new URL(u); return (x.protocol === 'http:' || x.protocol === 'https:') ? u : null; }
-  catch { return null; }
-}
 
 // Trusted verify key (bundled in prod, dev key under LUMALINE_HOME). Read once.
 const pubPem = (() => { try { return readFileSync(PUB); } catch { return null; } })();
@@ -93,7 +80,7 @@ async function main() {
   const state = loadJson(STATE, null);
   let r;
   try {
-    r = await step({ state, now, activity, post, cfg: { cooldownMs: COOLDOWN_MS, verifyAd } });
+    r = await step({ state, now, activity, post, cfg: { cooldownMs: COOLDOWN_MS, verifyAd, showUrl: SHOW_URL } });
   } catch (e) {
     audit({ event: 'step_error', message: e && e.message });
     return base;   // backend unreachable / error -> graceful base status, nothing billed
@@ -101,13 +88,16 @@ async function main() {
   if (r.verifyFail) { audit({ event: 'verify_fail' }); saveJson(STATE, null); return base; }
   saveJson(STATE, r.state);
   if (!r.status) return base;
-  // The labeled line is the hyperlink (clean text, no raw URL by default; "sponsored" stays —
-  // honest-disclosure invariant). OSC-8 makes the whole line clickable where Claude Code forwards
-  // it (IDE terminals). On a standalone terminal that passthrough is broken upstream (#26356), so
-  // LUMALINE_SHOW_URL=1 appends the plain dest URL as text — the terminal's own URL detection
-  // (kitty ctrl+click / foot url-mode) can then open it.
+  // r.status already carries the inline URL + "sponsored" disclosure (built in client/window.mjs,
+  // gated by SHOW_URL). OSC-8 makes the WHOLE line clickable where Claude Code forwards it (IDE
+  // terminals); on standalone terminals that passthrough is broken upstream (#26356), but the
+  // inline URL is visible text so the terminal's own detection (kitty ctrl+click / foot url-mode)
+  // or copy/paste still reaches it.
   const url = r.clickUrl ? safeClickUrl(r.clickUrl) : null;
-  const line = (url && SHOW_URL) ? `${r.status}  ${url}` : r.status;
+  // Color the sponsored line (brand green by default) so it reads as a deliberate element instead
+  // of dim status-bar chrome. Base status stays unstyled (returned earlier). The SGR reset sits
+  // INSIDE the OSC-8 text span so it cannot break the hyperlink terminator.
+  const line = COLOR ? `${COLOR}${r.status}${COLOR_RESET}` : r.status;
   return (url && HYPERLINKS) ? osc8(url, line) : line;
 }
 

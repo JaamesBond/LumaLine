@@ -43,11 +43,34 @@ export const FETCH_TIMEOUT_MS = Number(env.LUMALINE_FETCH_TIMEOUT_MS || 3000);
 export const COOLDOWN_MS = 15_000;
 export const REFRESH_SECONDS = Number(env.LUMALINE_REFRESH || 1);   // statusLine.refreshInterval
 export const HYPERLINKS = env.LUMALINE_HYPERLINKS !== '0';          // OSC 8 clickable links (on by default)
-// Append the plain dest URL as TEXT after the line. Claude Code's status-bar OSC-8 passthrough is
-// broken on standalone terminals (upstream regression #26356) so the OSC-8 link is not clickable
-// there — but a terminal's OWN url detection (kitty ctrl+click / foot ctrl+shift+u url-mode) CAN
-// open a visible https:// URL. Opt-in (keeps the line clean by default); set LUMALINE_SHOW_URL=1
-// on a plain terminal to make the link reachable without an IDE.
-export const SHOW_URL = env.LUMALINE_SHOW_URL === '1';
+// Show the dest URL inline in the sponsored line (`★ <line>  ·  <url>  ·  sponsored (Ns)`). ON by
+// default: it's transparent AND reachable everywhere — Claude Code's status-bar OSC-8 passthrough
+// is broken on standalone terminals (upstream regression #26356), but a visible https:// URL can
+// still be opened by the terminal's own url detection (kitty ctrl+click / foot url-mode) or just
+// copy/paste. Set LUMALINE_SHOW_URL=0 (or off/false) to hide it and keep the line clickable via
+// the OSC-8 hyperlink only.
+export const SHOW_URL = !['0', 'off', 'false'].includes((env.LUMALINE_SHOW_URL || '').toLowerCase());
+
+// Color for the sponsored line. Claude Code renders the status bar dim by default, so the
+// sponsored line otherwise reads as faded gray; emitting an explicit SGR makes it the brand
+// green (oklch(72% .16 160) -> sRGB ~ #11C281) instead. Only the sponsored line is colored —
+// the normal base status stays unstyled. Honors the NO_COLOR standard (https://no-color.org)
+// and a LUMALINE_COLOR override: a 6-digit hex ('#11c281' / '11c281'), a raw SGR sequence
+// ('1;92'), or 'off'/'0' to disable. The disclosure ("sponsored") text is unchanged — this
+// restyles, it never hides the label.
+function buildColor() {
+  if (env.NO_COLOR != null) return '';
+  const v = env.LUMALINE_COLOR;
+  if (v === 'off' || v === '0') return '';
+  if (v && /^#?[0-9a-fA-F]{6}$/.test(v)) {
+    const h = v.replace('#', '');
+    const [r, g, b] = [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+    return `\x1b[38;2;${r};${g};${b}m`;
+  }
+  if (v && /^[0-9;]+$/.test(v)) return `\x1b[${v}m`;     // raw SGR (e.g. '92' bright green)
+  return '\x1b[38;2;17;194;129m';                         // default brand green (#11C281)
+}
+export const COLOR = buildColor();
+export const COLOR_RESET = COLOR ? '\x1b[0m' : '';
 // NB: the click-token HMAC secret is a SERVER-ONLY concern — the client never holds or
 // needs it. The dev backend supplies it explicitly (random if unset); see poc/backend.

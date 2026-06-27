@@ -33,12 +33,14 @@ Claude Code's status bar during that wait — using **only** the official `statu
 No bundle patching. No silent updates. No security trade-offs.
 
 ```
-★ LumaLine — honest, signed ads for Claude Code  ·  sponsored (5s)
+★ LumaLine — honest, signed ads for Claude Code  ·  https://luma-line.lovable.app  ·  sponsored (5s)
 ```
 
-> One labeled line, Ed25519-signed before it ever renders. The whole line is an OSC-8 hyperlink
-> straight to the advertiser's site (the URL is signed, so it can't be tampered with); no raw URL
-> clutters the line. Disable links any time with `LUMALINE_HYPERLINKS=0`.
+> One labeled line, Ed25519-signed before it ever renders. The destination URL is shown **inline**
+> (transparent, and copy/click-reachable in any terminal), and the whole line is also an OSC-8
+> hyperlink straight to the advertiser's site (the URL is signed, so it can't be tampered with).
+> The line is colored the brand green by default. Hide the URL with `LUMALINE_SHOW_URL=0`, disable
+> color with `NO_COLOR=1` (or `LUMALINE_COLOR=off`), disable links with `LUMALINE_HYPERLINKS=0`.
 
 **Public beta is live now.** The signed feed currently serves LumaLine's own self-promo line so
 you can install it and watch the whole trust loop run for real. **Per-publisher *earnings* unlock
@@ -120,7 +122,7 @@ The whole pitch is that every objection is answered in code:
 | Can I undo it? | `lumaline uninstall` restores your old status line. A full settings backup is kept. |
 | Could a forged ad get through? | Ed25519-signed; the client verifies the exact bytes against a bundled public key and refuses anything that fails. |
 | What's it pulling into my machine? | **Zero** runtime dependencies. `node:` built-ins only. Nothing transitive to audit. |
-| Could a link hijack my terminal? | The clickable URL is validated (absolute http(s), no control chars) before it's wrapped in an OSC-8 escape. |
+| Could a link hijack my terminal? | The URL is validated (absolute http(s), no control chars) before it's ever shown inline or wrapped in an OSC-8 escape. |
 | Do I have to trust your word? | Open-source client, with a local human-readable audit log of every event. Verify it yourself. |
 
 What leaves your machine per tick is just **`{ windowId, seq, hmac, activity-bucket, ts }`** — no
@@ -210,10 +212,9 @@ docs/                   design, feasibility, GTM
   are a correct OSC-8 link, but Claude Code mangles the passthrough to real terminals). **Views/CPVA
   are unaffected** and are the dependable model; **clicks/CPC** work in IDE terminals today and will
   work everywhere once the upstream bug is fixed.
-  - *Plain-terminal workaround:* set `LUMALINE_SHOW_URL=1` (e.g. `LUMALINE_SHOW_URL=1 claude`) to
-    append the destination as a visible `https://…` so your terminal's own URL detection can open it —
-    **kitty** `ctrl+click` (or `ctrl+shift+e`), **foot** `ctrl+shift+u` (url-mode). Off by default to
-    keep the line clean.
+  - *Plain terminals:* the destination is shown **inline as a visible `https://…` by default**, so
+    your terminal's own URL detection can open it — **kitty** `ctrl+click` (or `ctrl+shift+e`),
+    **foot** `ctrl+shift+u` (url-mode) — or just copy/paste. Hide it with `LUMALINE_SHOW_URL=0`.
 
 We'd rather under-promise here than oversell. [Track progress / get launch access →](https://luma-line.lovable.app)
 
