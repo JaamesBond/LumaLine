@@ -43,5 +43,11 @@ export const FETCH_TIMEOUT_MS = Number(env.LUMALINE_FETCH_TIMEOUT_MS || 3000);
 export const COOLDOWN_MS = 15_000;
 export const REFRESH_SECONDS = Number(env.LUMALINE_REFRESH || 1);   // statusLine.refreshInterval
 export const HYPERLINKS = env.LUMALINE_HYPERLINKS !== '0';          // OSC 8 clickable links (on by default)
+// Append the plain dest URL as TEXT after the line. Claude Code's status-bar OSC-8 passthrough is
+// broken on standalone terminals (upstream regression #26356) so the OSC-8 link is not clickable
+// there — but a terminal's OWN url detection (kitty ctrl+click / foot ctrl+shift+u url-mode) CAN
+// open a visible https:// URL. Opt-in (keeps the line clean by default); set LUMALINE_SHOW_URL=1
+// on a plain terminal to make the link reachable without an IDE.
+export const SHOW_URL = env.LUMALINE_SHOW_URL === '1';
 // NB: the click-token HMAC secret is a SERVER-ONLY concern — the client never holds or
 // needs it. The dev backend supplies it explicitly (random if unset); see poc/backend.

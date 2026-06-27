@@ -210,6 +210,10 @@ docs/                   design, feasibility, GTM
   are a correct OSC-8 link, but Claude Code mangles the passthrough to real terminals). **Views/CPVA
   are unaffected** and are the dependable model; **clicks/CPC** work in IDE terminals today and will
   work everywhere once the upstream bug is fixed.
+  - *Plain-terminal workaround:* set `LUMALINE_SHOW_URL=1` (e.g. `LUMALINE_SHOW_URL=1 claude`) to
+    append the destination as a visible `https://…` so your terminal's own URL detection can open it —
+    **kitty** `ctrl+click` (or `ctrl+shift+e`), **foot** `ctrl+shift+u` (url-mode). Off by default to
+    keep the line clean.
 
 We'd rather under-promise here than oversell. [Track progress / get launch access →](https://luma-line.lovable.app)
 

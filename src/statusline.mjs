@@ -15,7 +15,7 @@
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import {
   LUMALINE_HOME, PUB, STATE, AUDIT, FEED_BASE,
-  FETCH_TIMEOUT_MS, COOLDOWN_MS, HYPERLINKS,
+  FETCH_TIMEOUT_MS, COOLDOWN_MS, HYPERLINKS, SHOW_URL,
 } from './config.mjs';
 import { step } from './client/window.mjs';
 import { verifyData } from './lib/crypto.mjs';
@@ -101,10 +101,14 @@ async function main() {
   if (r.verifyFail) { audit({ event: 'verify_fail' }); saveJson(STATE, null); return base; }
   saveJson(STATE, r.state);
   if (!r.status) return base;
-  // The whole labeled line IS the hyperlink — clean text, no raw URL shown. The "sponsored"
-  // label stays (honest-disclosure invariant); a click opens the advertiser's site directly.
-  const safe = (r.clickUrl && HYPERLINKS) ? safeClickUrl(r.clickUrl) : null;
-  return safe ? osc8(safe, r.status) : r.status;
+  // The labeled line is the hyperlink (clean text, no raw URL by default; "sponsored" stays —
+  // honest-disclosure invariant). OSC-8 makes the whole line clickable where Claude Code forwards
+  // it (IDE terminals). On a standalone terminal that passthrough is broken upstream (#26356), so
+  // LUMALINE_SHOW_URL=1 appends the plain dest URL as text — the terminal's own URL detection
+  // (kitty ctrl+click / foot url-mode) can then open it.
+  const url = r.clickUrl ? safeClickUrl(r.clickUrl) : null;
+  const line = (url && SHOW_URL) ? `${r.status}  ${url}` : r.status;
+  return (url && HYPERLINKS) ? osc8(url, line) : line;
 }
 
 main()
