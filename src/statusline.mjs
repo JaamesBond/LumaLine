@@ -15,7 +15,7 @@
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import {
   LUMALINE_HOME, PUB, STATE, AUDIT, FEED_BASE,
-  FETCH_TIMEOUT_MS, COOLDOWN_MS, HYPERLINKS, SHOW_URL,
+  FETCH_TIMEOUT_MS, COOLDOWN_MS, HYPERLINKS, SHOW_URL, COLOR, COLOR_RESET,
 } from './config.mjs';
 import { step } from './client/window.mjs';
 import { verifyData } from './lib/crypto.mjs';
@@ -107,7 +107,11 @@ async function main() {
   // LUMALINE_SHOW_URL=1 appends the plain dest URL as text — the terminal's own URL detection
   // (kitty ctrl+click / foot url-mode) can then open it.
   const url = r.clickUrl ? safeClickUrl(r.clickUrl) : null;
-  const line = (url && SHOW_URL) ? `${r.status}  ${url}` : r.status;
+  const text = (url && SHOW_URL) ? `${r.status}  ${url}` : r.status;
+  // Color the sponsored line (brand green by default) so it reads as a deliberate element
+  // instead of dim status-bar chrome. Base status stays unstyled (returned earlier). The SGR
+  // reset sits INSIDE the OSC-8 text span so it cannot break the hyperlink terminator.
+  const line = COLOR ? `${COLOR}${text}${COLOR_RESET}` : text;
   return (url && HYPERLINKS) ? osc8(url, line) : line;
 }
 
