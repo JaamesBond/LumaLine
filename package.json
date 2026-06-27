@@ -1,0 +1,40 @@
+{
+  "name": "lumaline",
+  "version": "0.1.0",
+  "description": "Trust-first sponsored status line for Claude Code. Official statusLine only — signed feed, no bundle patching, no CSP changes.",
+  "type": "module",
+  "bin": {
+    "lumaline": "bin/lumaline.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test",
+    "demo": "node poc/demo-session.mjs",
+    "demo:plain": "node poc/demo-session.mjs --plain",
+    "demo:plumbing": "node poc/demo.mjs"
+  },
+  "keywords": [
+    "claude-code",
+    "statusline",
+    "ads",
+    "sponsored",
+    "ai-monetization",
+    "developer-revenue"
+  ],
+  "homepage": "https://luma-line.lovable.app",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JaamesBond/LumaLine.git"
+  },
+  "bugs": {
+    "url": "https://github.com/JaamesBond/LumaLine/issues"
+  },
+  "license": "MIT"
+}

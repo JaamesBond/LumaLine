@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+*.log
+poc/.runtime/
+poc/live/settings.statusline-backup.json
+.secrets/
+.env.local
+supabase/.temp/
+supabase/.branches/
