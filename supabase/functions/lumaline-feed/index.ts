@@ -96,6 +96,34 @@ async function signAd(adData: string): Promise<string> {
   return btoa(String.fromCharCode(...new Uint8Array(sig)));
 }
 
+// --- rate limiting (salted IP hash; raw IP never stored) ------------------------------
+// Compute sha256(LUMALINE_RL_SALT || client-ip) and immediately discard the IP. Only the
+// hash + a minute counter live in public.rl_buckets (see 20260627041000_rate_limit.sql).
+// The salt makes the hash non-reversible (raw IPv4 space is otherwise brute-forceable), so
+// this stays within the data-minimization invariant. No salt set => rate limiting is OFF
+// (fail-open), which makes deploying the code BEFORE the secret exists a no-op.
+async function clientIpHash(req: Request): Promise<string | null> {
+  const salt = Deno.env.get("LUMALINE_RL_SALT");
+  if (!salt) return null;
+  const ip = (req.headers.get("x-forwarded-for") ?? "").split(",")[0].trim();
+  if (!ip) return null;
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(salt + ip));
+  return btoa(String.fromCharCode(...new Uint8Array(buf)));
+}
+// True = allowed. Fail-OPEN on any error / missing config: rate limiting is a cost+abuse
+// guard, NOT a security control (signing + least-privilege grants are), and nothing is ever
+// billed on this feed — so availability wins over a perfect block on an rl backend hiccup.
+async function rateLimitOk(req: Request, auth: string): Promise<boolean> {
+  const ipHash = await clientIpHash(req);
+  if (!ipHash) return true;
+  const max = Number(Deno.env.get("LUMALINE_RL_MAX_PER_MIN") ?? "30");
+  try {
+    const { status, text } = await forwardRpc("rl_hit", { p_ip_hash: ipHash, p_max: max }, auth);
+    if (status !== 200) return true;
+    return JSON.parse(text) === true;
+  } catch { return true; }
+}
+
 // --- handler --------------------------------------------------------------------------
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -116,6 +144,9 @@ Deno.serve(async (req) => {
     // (and the misconfig is distinguishable from a real no-fill, not a silent verify_fail).
     try { await signKey(); }
     catch (e) { return json({ error: "feed misconfigured", detail: (e as Error).message }, 500); }
+
+    // Cost/abuse guard: rate-limit by salted IP hash BEFORE window_open inserts a DB row.
+    if (!(await rateLimitOk(req, auth))) return json({ error: "rate limited" }, 429);
 
     const snapshot = (body?.activitySnapshot as string) ?? "session";
     const { status, text } = await forwardRpc("window_open", { p_activity_snapshot: snapshot }, auth);
