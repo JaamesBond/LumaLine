@@ -11,6 +11,7 @@
 //   - close is best-effort (the server credits idempotently), so a lost close response
 //     never re-bills.
 import { hmacHex } from '../lib/crypto.mjs';
+import { safeClickUrl } from '../lib/url.mjs';
 
 // Coarse magnitude of the per-tick activity change. Raw values never leave the machine;
 // only this bucket is sent. 'none' => no real progress (idle is never billed).
@@ -23,7 +24,15 @@ function bucketDelta(activity, last) {
   return 'high';
 }
 
-const adLine = (state, left) => `★ ${state.line}  ·  ${state.label} (${left}s)`;
+// `★ <line>  ·  <url>  ·  <label> (Ns)` — the click URL is shown inline (between the
+// description and the disclosure) so it is transparent AND copy/click-reachable in any
+// terminal, not just IDE terminals where the OSC-8 hyperlink works. The URL is sanitized
+// here (it becomes visible text); cfg.showUrl === false drops it (keeps the line clickable
+// via OSC-8 only). The "sponsored" label is always present — honest disclosure.
+const adLine = (state, left, showUrl) => {
+  const u = showUrl === false ? null : safeClickUrl(state.clickUrl);
+  return `★ ${state.line}${u ? `  ·  ${u}` : ''}  ·  ${state.label} (${left}s)`;
+};
 const refuse = () => ({ state: null, status: null, verifyFail: true });
 
 export async function step({ state, now, activity, post, cfg }) {
@@ -45,7 +54,7 @@ export async function step({ state, now, activity, post, cfg }) {
       line: ad.line, label: ad.label ?? 'sponsored', clickUrl: ad.clickUrl,
       reported: false, lastActivityValue: activity,
     };
-    return { state, status: adLine(state, Math.round(state.dwellMs / 1000)), clickUrl: state.clickUrl };
+    return { state, status: adLine(state, Math.round(state.dwellMs / 1000), cfg.showUrl), clickUrl: state.clickUrl };
   }
 
   const elapsed = now - state.startedAt;
@@ -56,7 +65,7 @@ export async function step({ state, now, activity, post, cfg }) {
     await post('/window/beat', { windowId: state.windowId, seq, hmac, activityDelta });
     state = { ...state, seq, prevHash: hmac, lastActivityValue: activity };
     const left = Math.ceil((state.dwellMs - elapsed) / 1000);
-    return { state, status: adLine(state, left), clickUrl: state.clickUrl };
+    return { state, status: adLine(state, left, cfg.showUrl), clickUrl: state.clickUrl };
   }
 
   if (!state.reported) {
