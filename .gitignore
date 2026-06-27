@@ -8,3 +8,12 @@ poc/live/settings.statusline-backup.json
 .env.local
 supabase/.temp/
 supabase/.branches/
+
+# Internal-only docs — kept locally, never published (AI run playbook/log, triage notes,
+# raw design specs, unposted GTM drafts). Removed from public history on 2026-06-27.
+docs/LAUNCH_RUN_PROMPT.md
+docs/RUN_LOG.md
+docs/BLOCKED.md
+docs/REVIEW_TODO.md
+docs/superpowers/
+docs/gtm/
