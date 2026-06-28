@@ -1,0 +1,65 @@
+name: Release
+
+# GA npm publish with provenance (OIDC build attestation). Triggers on a version tag.
+#
+# STAY-PRIVATE GUARD (M0): package.json still has "private": true, so a real `npm publish`
+# is refused by npm until GA (M4) removes it — pushing a tag now cannot accidentally publish.
+# The publish step is validated by `--dry-run` (which npm allows even while private:true), and
+# `workflow_dispatch` defaults to a dry run so the workflow can be exercised end-to-end without
+# publishing. At GA: remove "private", configure npm OIDC trusted publishing / NPM_TOKEN + 2FA,
+# then push a `v*` tag.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (validate the publish without actually publishing)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write   # OIDC -> npm provenance attestation
+
+jobs:
+  publish:
+    name: npm publish (provenance)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Audit tarball (fail closed on any secret / private key / poc / .env)
+        run: |
+          set -euo pipefail
+          npm pack --silent >/tmp/tgz_name.txt
+          tgz="$(cat /tmp/tgz_name.txt)"
+          files="$(tar -tzf "$tgz")"
+          echo "$files"
+          # Fail the release if the tarball ships anything it must never contain.
+          if printf '%s\n' "$files" | grep -Eq '(^|/)\.env|(^|/)\.secrets|(^|/)poc/|private.*\.pem|\.key$'; then
+            echo "::error::tarball contains a forbidden path (secret/private key/poc/.env)"; exit 1
+          fi
+          # Fail if any PRIVATE KEY bytes are present in any packed file.
+          if tar -xzO -f "$tgz" | grep -q 'PRIVATE KEY'; then
+            echo "::error::tarball contains PRIVATE KEY material"; exit 1
+          fi
+          rm -f "$tgz"
+      - name: Test gate
+        run: node --test
+      - name: Publish
+        # On workflow_dispatch the default is a dry run; a real `v*` tag push publishes for real
+        # (blocked by "private": true until GA). DRY_RUN is a controlled boolean routed through
+        # env — never untrusted input interpolated into the shell.
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && 'true' || 'false' }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            npm publish --provenance --access public --dry-run
+          else
+            npm publish --provenance --access public
+          fi

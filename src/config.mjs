@@ -18,9 +18,16 @@ export const AUDIT = path.join(LUMALINE_HOME, 'audit.log');
 export const BACKEND_LOG = path.join(LUMALINE_HOME, 'backend-impressions.log');
 
 // Trusted verify key: a bundled key ships with the package in prod; fall back to
-// the locally generated dev key under LUMALINE_HOME.
+// the locally generated dev key under LUMALINE_HOME. PUB is the LEGACY/DEFAULT key —
+// used to verify any signed envelope that arrives WITHOUT a `keyid` (backward compat).
 const bundledPub = fileURLToPath(new URL('./keys/public.pem', import.meta.url));
 export const PUB = env.LUMALINE_PUBKEY || (existsSync(bundledPub) ? bundledPub : path.join(KEYS, 'public.pem'));
+
+// Bundled key DIRECTORY — holds the CURRENT + NEXT trusted public keys, selected at verify
+// time by `keyid` (content-addressed fingerprint). This is what makes the client
+// key-rotation-safe: it already trusts the next key before the feed ever signs with it, so a
+// rotation (or compromise response) never blacks out installed clients. See src/lib/keyring.mjs.
+export const KEYS_DIR = env.LUMALINE_KEYS_DIR || fileURLToPath(new URL('./keys', import.meta.url));
 
 // Feed endpoint. Defaults to the live remote signed self-promo feed (the lumaline-feed
 // edge function on the prod Supabase project); override with LUMALINE_FEED for local dev
