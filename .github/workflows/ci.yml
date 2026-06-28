@@ -1,0 +1,33 @@
+name: CI
+
+# Test gate: lumaline has ZERO runtime deps and uses Node's built-in test runner, so CI is
+# just `node --test` across the supported Node range. No install step (there is no lockfile
+# and nothing to install). Branch protection on `main` should require the `test` checks.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# Cancel an in-flight run for the same ref when a new push lands (a branch push that also has an
+# open PR otherwise triggers two overlapping runs).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: node --test (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['18', '20']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Run tests
+        run: node --test
