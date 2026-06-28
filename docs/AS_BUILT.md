@@ -10,6 +10,13 @@
 > describe an in-memory `src/server/` verification design and "P0–P6" phase names that are **no longer
 > the architecture**. This file is the reconciliation between them.
 
+> **M0 owner actions — EXECUTED 2026-06-29** (after this doc's first draft): branch protection on
+> `main` is live; `schema_migrations` reconciled to **13** versions (D4 closed); the live `lumaline-feed`
+> now **emits `keyid=8720926064dfdf50`** (activated + redeployed, verified); the next private key is in
+> Vault as `LUMALINE_ED25519_NEXT_PRIVATE_KEY` with the disk copy shredded (D3 closed); a fresh
+> `supabase db reset` reproduced the live object set with **zero drift**. The only M0 item left is the
+> owner's merge of PR #3.
+
 ---
 
 ## 1. The actual production architecture
@@ -199,8 +206,8 @@ that closes it.
 |---|---|---|---|
 | **D1** | **Public transparency / clearing report** (aggregate fill, credited views, clearing prices, publisher-share %, clawback rate). | **This is the product thesis** — transparency is the whole pitch vs. invasive monetizers — so it is **explicitly tracked, never dropped**. It needs real cleared traffic to report on, which only exists after paid demand (M2) and go-live (M5). Figures must reconcile to the ledger and stay non-PII (data-minimization invariant). | **M6** (M6-T5) |
 | **D2** | **Second-price auction.** | With a **single advertiser**, a full second-price auction is dead code. **First-price / reserve-floor clears today.** The schema **retains the clearing-price column** so the second-price upgrade is **non-breaking** when multiple advertisers exist. | **Post-multi-advertiser** (designed into M2-T1 serving) |
-| **D3** | **Next-key private custody in Vault.** | The `keyid` mechanism + the **public** next key (`31433cdee001fc81`) ship now so clients trust it *before* the feed flips. The matching **private** key (`.secrets/ed25519_next_private.pem`, gitignored) must be moved into Supabase Vault by the owner before a rotation is actually performed (secrets-never-committed invariant). | **Owner action** (exercised in M0-T4 / on rotation) |
-| **D4** | **`schema_migrations` history repair** (the 2 out-of-band versions + the drift-capture row). | Objects/grants are already live and the migrations are idempotent; the only gap is the **history table**, and the reconciling write is a production write that the auto-mode guard correctly blocks. Non-blocking; documented above. | **Owner action** (`supabase migration repair …`) |
+| **D3** | **Next-key private custody in Vault.** | The `keyid` mechanism + the **public** next key (`31433cdee001fc81`) ship now so clients trust it *before* the feed flips. | ✅ **DONE 2026-06-29** — next private stored in Vault as `LUMALINE_ED25519_NEXT_PRIVATE_KEY` (byte-verified vs the local PEM), disk copy shredded. |
+| **D4** | **`schema_migrations` history repair** (the 2 out-of-band versions + the drift-capture row). | Objects/grants were already live and the migrations are idempotent; the gap was the **history table** only. | ✅ **DONE 2026-06-29** — history reconciled to **13** versions; future `db push` is clean. |
 | **D5** | **Per-publisher earnings / payouts** (device-code `lumaline login`, attribution off the sentinel, Stripe charging + Connect payouts, money-safety gates, independent security review). | The beta is intentionally **sentinel-only, `gross = 0`, never billed** — *see it live today, not get paid today*. The full money machine is built + proven in **Stripe test mode** before a single real dollar moves, behind legal and security gates. | **M1–M3** (test mode), **M5** (live go-live) |
 | **D6** | **Branded domain + CPC measurement + GA npm publish.** | Installed clients don't self-update, so GA must ship on the **stable branded URL** and **rotation-safe** (the M0 `keyid` work is its hard prerequisite). Until then the beta installs via `npm i -g github:JaamesBond/LumaLine`. CPC is also gated by upstream OSC-8 bug #26356 (clicks in IDE terminals only today). | **M4** |
 | **D7** | **Scale / ops deferrals:** load-test validation of the ~15k writes/s ceiling, richer IVT heuristics (data-min-safe), advertiser API keys, full dashboards/on-call runbook, DR-at-scale. | Not on the money-honesty critical path; the money-critical alerts (ledger-imbalance, payout-failure, reconciliation) land earlier at M3-T6. | **M6** |
