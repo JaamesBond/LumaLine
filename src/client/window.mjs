@@ -44,7 +44,9 @@ export async function step({ state, now, activity, post, cfg }) {
   const activeSince = state && state.lastActivityValue !== activity;
   if (!state || (cooled && activeSince)) {
     const w = await post('/window/open', { sessionId: 'cli', activitySnapshot: 'session' });
-    if (!cfg.verifyAd(w.adData, w.sig)) return refuse();   // signed content only
+    // Signed content only: select the trusted key by the envelope's keyid (absent => legacy
+    // default), then verify. Unknown keyid or a bad sig => refuse (rotation-safe).
+    if (!cfg.verifyAd(w.adData, w.sig, w.keyid)) return refuse();
     let ad;
     try { ad = JSON.parse(w.adData); } catch { return refuse(); }
     if (ad.windowId !== w.windowId) return refuse();        // ad must be bound to this window

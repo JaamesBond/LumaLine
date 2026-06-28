@@ -14,11 +14,11 @@
 //     cost/token values stay local.
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import {
-  LUMALINE_HOME, PUB, STATE, AUDIT, FEED_BASE,
+  LUMALINE_HOME, PUB, KEYS_DIR, STATE, AUDIT, FEED_BASE,
   FETCH_TIMEOUT_MS, COOLDOWN_MS, HYPERLINKS, SHOW_URL, COLOR, COLOR_RESET,
 } from './config.mjs';
 import { step } from './client/window.mjs';
-import { verifyData } from './lib/crypto.mjs';
+import { loadKeyring } from './lib/keyring.mjs';
 import { safeClickUrl } from './lib/url.mjs';
 
 mkdirSync(LUMALINE_HOME, { recursive: true });
@@ -33,10 +33,12 @@ const audit = (evt) => appendFileSync(AUDIT, JSON.stringify({ ts: now, ...evt })
 // inline URL (built in client/window.mjs) and this OSC-8 click target.
 const osc8 = (url, text) => `\x1b]8;;${url}\x07${text}\x1b]8;;\x07`;
 
-// Trusted verify key (bundled in prod, dev key under LUMALINE_HOME). Read once.
-const pubPem = (() => { try { return readFileSync(PUB); } catch { return null; } })();
-const verifyAd = (adData, sig) =>
-  (pubPem && typeof adData === 'string' && typeof sig === 'string') ? verifyData(adData, sig, pubPem) : false;
+// Trusted verify ring: the bundled CURRENT + NEXT public keys (selected by `keyid`), plus
+// the legacy/default key (PUB) for envelopes that predate keyid. Built once per tick. An
+// unknown keyid — or a sig that doesn't verify under its keyid's key — is refused, so a key
+// rotation never blacks out clients that already bundle the next key (signed-content-only).
+const keyring = loadKeyring({ keysDir: KEYS_DIR, legacyPubPath: PUB });
+const verifyAd = (adData, sig, keyid) => keyring.verify(adData, sig, keyid);
 
 function readClaudeStdin() {
   let raw = '';
