@@ -171,8 +171,17 @@ Deno.serve(async (req) => {
     let sig: string;
     try { sig = await signAd(adData); }
     catch (e) { return json({ error: "feed misconfigured", detail: (e as Error).message }, 500); }
+    // Rotation-safe key selection: advertise WHICH bundled public key signed this envelope.
+    // KEY_ID = the active signing key's fingerprint (keyFingerprint() in src/lib/crypto.mjs:
+    // sha256(spki-der)[:16]). The client selects the matching trusted key from its bundle and
+    // verifies. Omitted when unset, so the client falls back to its legacy/default key — making
+    // this an additive, backward-compatible change. To rotate: ship clients trusting the next
+    // key, THEN set LUMALINE_ED25519_PRIVATE_KEY=next + LUMALINE_ED25519_KEY_ID=fp(next).
+    // Normalize (trim + lowercase) so a stray space / upper-case hex in the env can't desync
+    // from the client's lower-case content fingerprint and cause an unknown-keyid blackout.
+    const keyid = Deno.env.get("LUMALINE_ED25519_KEY_ID")?.trim().toLowerCase() || undefined;
     return json({
-      windowId, adData, sig,
+      windowId, adData, sig, keyid,
       dwellMs: rpc.dwell_ms, hbIntervalMs: rpc.hb_interval_ms, challenge: rpc.challenge,
     });
   }
