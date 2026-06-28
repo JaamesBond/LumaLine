@@ -14,6 +14,12 @@ entire substance of "how rotation stays non-destructive").
 > not trust and every one of those clients goes silent. The whole point of the keyid ring is to
 > let clients trust the *next* key **before** the feed ever signs with it.
 
+> **STATUS as of 2026-06-29:** the live feed **now emits `keyid=8720926064dfdf50`**
+> (`LUMALINE_ED25519_KEY_ID` set + `lumaline-feed` redeployed, verified). The next private key is
+> already in Vault as `LUMALINE_ED25519_NEXT_PRIVATE_KEY` (§1.1 done; disk copy shredded). Notes
+> below that say keyid is "omitted today" / the next private is "on disk" describe the **pre-activation**
+> state and are kept as procedure reference — the *steps* remain correct for the next rotation.
+
 ---
 
 ## 0. Roles — who does what
