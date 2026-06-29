@@ -1,12 +1,6 @@
-> **DRAFT — pending legal review.** This document is an engineering-authored
-> draft prepared for the owner's legal review and sign-off. It has **not** been
-> reviewed by a lawyer and is **not** in force. Do not publish or rely on it
-> until the owner has completed the OWNER-TODO items at the bottom and obtained
-> legal approval.
-
 # LumaLine Publisher Terms of Service
 
-**Last updated:** 2026-06-29 · **Status:** Draft v0.1
+**Last updated:** 2026-06-29 · **Effective:** 2026-06-29 · **Status:** v1.0 — in force (approved by Aivora SRL)
 
 These Terms govern your participation as a **publisher** in LumaLine — the
 `lumaline` tool that shows a clearly-labeled, signed, sponsored line in the
@@ -174,22 +168,8 @@ Continued participation after an update means you accept the revised Terms.
 These Terms are governed by the laws of **Romania**, without regard to
 conflict-of-laws rules, and any disputes will be resolved in the courts of that
 jurisdiction (or as otherwise required by applicable consumer-protection law).
-*(Confirm with counsel — kept consistent with the Privacy Policy's jurisdiction.)*
 
 ## 14. Contact
 
 - **Support / disputes:** patrascu.matei03@gmail.com
 - **Legal entity:** Aivora SRL — Str. Prieteniei 3, Constanța, Romania, 900293
-
----
-
-### OWNER-TODO checklist (must be resolved before publishing)
-
-- [x] Legal entity + registered address — Aivora SRL, Str. Prieteniei 3, Constanța, Romania, 900293
-- [x] Support / disputes contact email — patrascu.matei03@gmail.com
-- [x] Governing law / jurisdiction — Romania (confirm with counsel)
-- [x] Dispute-response SLA — **5 business days**
-- [x] Minimum payout — **US$25.00** (schedule confirmed at go-live)
-- [x] Revenue split — **60% publisher / 40% platform**
-- [x] Clawback / clearing window — **72 hours**
-- [x] Liability cap — **US$100**

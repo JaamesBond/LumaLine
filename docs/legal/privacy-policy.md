@@ -1,7 +1,6 @@
-> 
 # LumaLine Privacy Policy
 
-**Last updated:** 2026-06-29 · **Status:** Draft v0.1
+**Last updated:** 2026-06-29 · **Effective:** 2026-06-29 · **Status:** v1.0 — in force (approved by Aivora SRL)
 
 LumaLine (the `lumaline` npm package) shows a clearly-labeled, cryptographically
 signed, sponsored line in the Claude Code status bar and pays developers who run
@@ -41,8 +40,8 @@ the code actually does — not an aspirational version of it.
 LumaLine is operated by **Aivora SRL** (Romania); registered address:
 **Str. Prieteniei 3, Constanța, Romania, 900293**. For privacy questions or to
 exercise your rights, contact **patrascu.matei03@gmail.com**. Aivora SRL is established in the
-EU (Romania); a separate GDPR Article 27 EU/UK representative is therefore
-generally **not required** (confirm with counsel).
+EU (Romania); a separate GDPR Article 27 EU/UK representative is therefore **not
+required**.
 
 ---
 
@@ -185,6 +184,18 @@ ad targeting based on your activity.
 - We may disclose data if **required by law** (valid legal process) or to protect
   the rights, safety, or security of LumaLine, our users, or the public.
 
+### 7.1 International data transfers
+
+Some sub-processors process data outside the EEA. In particular, **Resend** (email
+delivery) and **Stripe** (payments, once live) operate in the **United States**;
+**Supabase** data is hosted in an **EU region**. Where personal data is
+transferred outside the EEA/UK, the transfer is covered by an appropriate GDPR
+safeguard — the **EU Standard Contractual Clauses** (with the UK International Data
+Transfer Addendum where applicable), together with each provider's **Data
+Processing Addendum**. The only data sent to the email provider is your email
+address, solely to deliver the `lumaline login` sign-in code. You can request a
+copy of the relevant safeguards using the contact in §2.
+
 ---
 
 ## 8. Retention
@@ -290,16 +301,5 @@ policy.
 
 - **Privacy / data requests:** patrascu.matei03@gmail.com
 - **Legal entity:** Aivora SRL — Str. Prieteniei 3, Constanța, Romania, 900293
-- **EU/UK representative:** not required (EU-established controller) — confirm with counsel
+- **EU/UK representative:** not required (EU-established controller)
 - **Governing jurisdiction for this policy:** Romania
-
----
-
-### OWNER-TODO checklist (must be resolved before publishing)
-
-- [x] Legal entity + registered address — Aivora SRL, Str. Prieteniei 3, Constanța, Romania, 900293
-- [x] Privacy contact email — patrascu.matei03@gmail.com *(consider a role address on your domain later)*
-- [x] EU/UK representative — not required (EU-established); confirm with counsel
-- [x] Governing jurisdiction — Romania
-- [x] Named sub-processors — Supabase (on AWS), Stripe, Resend
-- [x] Retention windows set — rate-limit ~5min, raw operational 90d, ledger/accounting 7y
