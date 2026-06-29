@@ -121,9 +121,8 @@ You may stop participating at any time (see §9).
 ## 8. Disputes
 
 If you believe earnings were wrongly withheld, clawed back, or calculated, you
-may dispute it by contacting **OWNER-TODO: support/disputes contact email** with
-the relevant details (e.g. dates, window ids, amounts from your ledger or audit
-log).
+may dispute it by contacting **patrascu.matei03@gmail.com** with the relevant
+details (e.g. dates, window ids, amounts from your ledger or audit log).
 
 - We will **acknowledge and respond within 5 business days** of receiving a
   complete dispute.
@@ -179,15 +178,15 @@ jurisdiction (or as otherwise required by applicable consumer-protection law).
 
 ## 14. Contact
 
-- **Support / disputes:** OWNER-TODO: support/disputes contact email
-- **Legal entity:** Aivora SRL (Romania) — registered address **OWNER-TODO**
+- **Support / disputes:** patrascu.matei03@gmail.com
+- **Legal entity:** Aivora SRL — Str. Prieteniei 3, Constanța, Romania, 900293
 
 ---
 
 ### OWNER-TODO checklist (must be resolved before publishing)
 
-- [x] Legal entity name — **Aivora SRL** · [ ] registered address still needed
-- [ ] Support / disputes contact email
+- [x] Legal entity + registered address — Aivora SRL, Str. Prieteniei 3, Constanța, Romania, 900293
+- [x] Support / disputes contact email — patrascu.matei03@gmail.com
 - [x] Governing law / jurisdiction — Romania (confirm with counsel)
 - [x] Dispute-response SLA — **5 business days**
 - [x] Minimum payout — **US$25.00** (schedule confirmed at go-live)
