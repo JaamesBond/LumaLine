@@ -86,9 +86,20 @@ insert into public.creatives (id, line_item_id, line, dest_url, label, status) v
    'https://luma-line.lovable.app', 'sponsored', 'active')
 on conflict (id) do nothing;
 
--- M2-T3: dev-a is the admin user for local dev + integration tests.
--- The admin-booking edge function checks app.admins via forwardRpc('admin_check').
+-- M2-T3: dev-admin is a separate identity from publisher dev-a (11111111...) so that
+-- the admin user is NOT treated as a publisher, which would break the earnings-RLS test
+-- (is_admin() returning true expands RLS to all rows, making A see B's balance).
 -- In production, admin rows are seeded out-of-band (service_role/SQL only).
+insert into auth.users (instance_id, id, aud, role, email, encrypted_password,
+    email_confirmed_at, raw_app_meta_data, raw_user_meta_data, created_at, updated_at,
+    confirmation_token, recovery_token, email_change_token_new, email_change)
+values
+  ('00000000-0000-0000-0000-000000000000', 'a0000000-0000-4000-8000-000000000001',
+   'authenticated', 'authenticated', 'dev-admin@lumaline.local',
+   extensions.crypt('devpassword', extensions.gen_salt('bf')), now(),
+   '{"provider":"email","providers":["email"]}', '{}', now(), now(), '', '', '', '')
+on conflict (id) do nothing;
+
 insert into app.admins (auth_user_id) values
-  ('11111111-1111-1111-1111-111111111111')
+  ('a0000000-0000-4000-8000-000000000001')
 on conflict (auth_user_id) do nothing;
