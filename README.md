@@ -209,7 +209,7 @@ docs/                   design, feasibility, GTM
 - [**Ad-surface feasibility**](docs/feasibility/2026-06-26-ad-surface-feasibility.md) — where an ad can live in Claude Code, and why `statusLine` is the sanctioned one.
 - [**Verification & economics design**](docs/superpowers/specs/2026-06-27-verification-and-economics-design.md) — the proof-of-dwell protocol, the honest threat model, and CPVA/CPC pricing.
 - [**Why this is honest**](docs/gtm/why-this-is-honest.md) — the one-page differentiator vs. invasive monetizers.
-- [**Privacy Policy**](docs/legal/privacy-policy.md) · [**Publisher Terms**](docs/legal/publisher-tos.md) — what login collects (UUID-only token, salted IP hash, nothing else) and the earnings-accrual-vs-payout timing. *(Drafts pending owner legal sign-off.)*
+- [**Privacy Policy**](docs/legal/privacy-policy.md) · [**Publisher Terms**](docs/legal/publisher-tos.md) — what login collects (UUID-only token, salted IP hash, nothing else) and the earnings-accrual-vs-payout timing. *(v1.0, in force.)*
 
 ---
 
@@ -219,10 +219,11 @@ docs/                   design, feasibility, GTM
   verify → server-verified dwell window (HMAC heartbeat chain + anti-batch) → recorded impression;
   a reference signed backend; a revenue ledger with clearing/clawback/IVT scan; a 34-test suite.
   The beta feed serves LumaLine's own self-promo line, **`gross = 0`, never billed.**
-- 🟡 **Built, gated on owner sign-off (M1):** device-code `lumaline login` / `logout` / `earnings`
-  — installs can now attribute impressions to a real publisher via a short-lived, revocable device
-  token; earnings accrue (payouts still gated to the production go-live). Live once the owner signs
-  off the Privacy Policy + Publisher Terms and the login backend is deployed.
+- 🟡 **Built, gated on deploy (M1):** device-code `lumaline login` / `logout` / `earnings` —
+  installs can now attribute impressions to a real publisher via a short-lived, revocable device
+  token; earnings accrue (payouts still gated to the production go-live). Privacy Policy + Publisher
+  Terms are **approved and in force**; live once the login backend is deployed (migration + the
+  `auth-device` function + Resend email for `/activate`).
 - 🚧 **Before GA earnings:** real advertiser onboarding, Stripe Connect payouts, the remaining legal
   (ad policy), a branded feed domain, and an npm registry publish (`0.1.0`, superseding the `0.0.1`
   reservation stub).

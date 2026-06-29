@@ -226,17 +226,21 @@ Built local-only (no live writes this session) on `feat/m1-publisher-login`; PR 
 - **M1-T5 — earnings read.** `/earnings` proxies the RLS-scoped `v_publisher_balance` +
   `v_publisher_window_clearing` with the caller's bearer (anon key stays server-side; no key ships in the
   client). `lumaline earnings` renders USD + the "payouts begin at go-live" disclosure.
-- **M1-T6 — legal (DRAFT).** `docs/legal/privacy-policy.md` + `publisher-tos.md`, matched to actual data flow
-  (UUID-only token, salted IP hash, coarse activity bucket; the `asn` column is **reserved, not collected** —
-  corrected from an earlier draft). **Owner legal sign-off + the `OWNER-TODO:` placeholders are outstanding.**
+- **M1-T6 — legal (v1.0, IN FORCE).** `docs/legal/privacy-policy.md` + `publisher-tos.md`, matched to actual
+  data flow (UUID-only token, salted IP hash, coarse activity bucket; the `asn` column is **reserved, not
+  collected**). **Owner-approved 2026-06-29** (Aivora SRL, Romania); all placeholders resolved — 60/40 split,
+  72h clawback, $25 payout min, $100 liability cap, 5-day dispute SLA, 5min/90d/7y retention, EU-rep not
+  required, sub-processors Supabase/Stripe/Resend + an SCC international-transfer clause. *(Owner-approved; not
+  separately attorney-reviewed.)*
 
 **Verified:** `node --test` **73/0**; the device-code flow + attribution + revocation + refresh + earnings-RLS
 proven against a **local Supabase stack** (real Deno runtime + Postgres). Adversarial review: 10 confirmed
 findings, all low/medium, 0 critical/high; 7 fixed, 3 deferred to the ledger (D8–D10).
 
 ### Owner gate to take M1 LIVE
-Legal sign-off (BLOCKING); enable Supabase Auth email/SMTP (for `/activate`); apply the migration + deploy
-`auth-device` (`--use-api`) + redeploy `lumaline-feed`; merge the PR. See `MILESTONE_STATUS.md` for the list.
+Legal ✅ done (v1.0 in force). Remaining: enable **Resend** as the Supabase Auth email sender (for
+`/activate`) + sign its DPA; apply the migration + deploy `auth-device` (`--use-api`) + redeploy
+`lumaline-feed`; merge the PR. See `MILESTONE_STATUS.md` for the list.
 
 ---
 
