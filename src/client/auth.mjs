@@ -114,11 +114,16 @@ export async function getValidAccessToken({
 
 // --- login (RFC 8628 device-code) -----------------------------------------------------
 const RETRYABLE = new Set(['authorization_pending', 'slow_down']);
+// Login is interactive (a human is approving in a browser), NOT the per-tick hot path, so it gets a
+// far more generous request timeout than FETCH_TIMEOUT_MS (3s, tuned for the statusline). A cold
+// edge-function start can exceed 3s; using the hot-path timeout here would abort a poll and, before
+// the fix below, crash the whole login on a single transient blip.
+const LOGIN_TIMEOUT_MS = 15_000;
 
 export async function login({
   file = DEVICE_TOKEN, authBase = AUTH_BASE, fetchImpl = fetch,
   out = console.log, sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
-  label, clientVersion, timeoutMs = FETCH_TIMEOUT_MS,
+  label, clientVersion, timeoutMs = LOGIN_TIMEOUT_MS,
 } = {}) {
   const start = await postJson(fetchImpl, `${authBase}/device/code`, { label, client_version: clientVersion }, { timeoutMs });
   if (!start.ok || !start.data?.device_code) {
@@ -143,7 +148,13 @@ export async function login({
   const deadline = Date.now() + (Number(expires_in) > 0 ? Number(expires_in) * 1000 : 600_000);
   while (Date.now() < deadline) {
     await sleep(intervalMs);
-    const poll = await postJson(fetchImpl, `${authBase}/device/token`, { device_code, label, client_version: clientVersion }, { timeoutMs });
+    // A transient network error or request timeout during the (potentially minutes-long) poll must
+    // NOT crash login — just keep polling until the code's deadline. Only an explicit server error
+    // (below) hard-fails. Without this, one slow poll throws AbortError straight out of login().
+    let poll;
+    try {
+      poll = await postJson(fetchImpl, `${authBase}/device/token`, { device_code, label, client_version: clientVersion }, { timeoutMs });
+    } catch { continue; }
     if (poll.ok && poll.data?.access_token) {
       const tok = shapeToken(poll.data, Date.now());
       saveToken(file, tok);

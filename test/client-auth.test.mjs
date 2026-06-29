@@ -140,6 +140,36 @@ test('login: device-code flow polls until approved, then persists the token', as
   assert.ok(tokenCalls >= 2, 'polled at least twice (pending then approved)');
 });
 
+test('login: a transient poll error (timeout/network) does NOT crash login — keeps polling', async () => {
+  // Regression: a single thrown fetch (e.g. AbortError on a slow cold-start poll) used to escape
+  // login() uncaught and kill the whole flow. It must be tolerated and polling must continue.
+  const f = tmp();
+  let tokenCalls = 0;
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/device/code')) {
+      return { ok: true, status: 200, json: async () => ({
+        device_code: 'DC', user_code: 'U', verification_uri: 'https://x/a', interval: 0, expires_in: 600,
+      }) };
+    }
+    if (url.endsWith('/device/token')) {
+      tokenCalls++;
+      if (tokenCalls === 1) throw Object.assign(new Error('aborted'), { name: 'AbortError' }); // transient
+      if (tokenCalls === 2) return { ok: false, status: 400, json: async () => ({ error: 'authorization_pending' }) };
+      return { ok: true, status: 200, json: async () => ({
+        access_token: fakeJwt(2_000_000_000, { publisher_id: 'pZ' }), refresh_token: 'R2',
+        expires_in: 3600, publisher_id: 'pZ', device_id: 'dZ', handle: 'dev-z',
+      }) };
+    }
+    throw new Error('unexpected url ' + url);
+  };
+  const res = await login({
+    file: f, authBase: 'https://x/auth-device', fetchImpl, sleep: async () => {}, out: () => {}, now: 1000,
+  });
+  assert.equal(res.handle, 'dev-z', 'login completed despite a transient poll throw');
+  assert.ok(tokenCalls >= 3, 'kept polling through the thrown error');
+  assert.equal(loadToken(f).publisher_id, 'pZ', 'token persisted');
+});
+
 test('login: surfaces access_denied / expired without persisting a token', async () => {
   const f = tmp();
   const fetchImpl = async (url) => {
