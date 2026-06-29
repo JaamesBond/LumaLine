@@ -230,3 +230,196 @@ test('billing: house guard fires before below-minimum check (both conditions tru
   assert.equal(result.reason, 'house_advertiser',
     'house_advertiser reason must take priority over below_stripe_minimum');
 });
+
+// ===========================================================================
+// M2-T5: Reconciliation helpers — mirrored from supabase/functions/billing/index.ts
+//
+// WHAT IS TESTED:
+//   recon: centsToMicros — Stripe cents to micro-USD (exact, no rounding)
+//   recon: buildReconReport — matching totals → ok: true
+//   recon: buildReconReport — DB > Stripe → ok: false, positive discrepancy
+//   recon: buildReconReport — Stripe > DB → ok: false, negative discrepancy
+//   recon: buildReconReport — empty both sides → ok: true, all zeros
+//   recon: buildReconReport — non-lumaline PI is excluded from Stripe total
+//   recon: buildReconReport — non-succeeded PI (declined) is excluded
+//   recon: buildReconReport — db_count and stripe_count are correct
+// ===========================================================================
+
+/** Convert Stripe cents to micro-USD. 1 cent = 10,000 micro-USD. Exact (no rounding). */
+function centsToMicros(cents) {
+  return cents * 10000;
+}
+
+/**
+ * Build a reconciliation report from pre-aggregated DB data and raw Stripe PaymentIntents.
+ * Pure function — no I/O.
+ *
+ * Rules for Stripe side:
+ *   - Only PaymentIntents with metadata.source === 'lumaline' are counted.
+ *   - Only PaymentIntents with status === 'succeeded' are counted.
+ *   - A declined PI has amount set but status !== 'succeeded'; it must NOT inflate the total.
+ */
+function buildReconReport({ dbTotalMicros, dbCount, stripePaymentIntents, from, to }) {
+  const lumalineSucceeded = stripePaymentIntents.filter(
+    (pi) => pi.metadata?.source === 'lumaline' && pi.status === 'succeeded',
+  );
+  const stripeTotalCents  = lumalineSucceeded.reduce((sum, pi) => sum + pi.amount, 0);
+  const stripeTotalMicros = centsToMicros(stripeTotalCents);
+  const discrepancyMicros = dbTotalMicros - stripeTotalMicros;
+  return {
+    ok:                  discrepancyMicros === 0,
+    period:              { from, to },
+    db_total_micros:     dbTotalMicros,
+    stripe_total_micros: stripeTotalMicros,
+    discrepancy_micros:  discrepancyMicros,
+    db_count:            dbCount,
+    stripe_count:        lumalineSucceeded.length,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// centsToMicros — Stripe cents to micro-USD conversion
+// ---------------------------------------------------------------------------
+
+test('billing: recon centsToMicros converts 100 cents to 1000000 micros', () => {
+  // $1.00 = 100 Stripe cents = 1,000,000 micro-USD
+  assert.equal(centsToMicros(100), 1_000_000);
+});
+
+test('billing: recon centsToMicros converts 50 cents to 500000 micros', () => {
+  // $0.50 (Stripe minimum) = 50 cents = 500,000 micro-USD
+  assert.equal(centsToMicros(50), 500_000);
+});
+
+test('billing: recon centsToMicros converts 0 to 0', () => {
+  assert.equal(centsToMicros(0), 0);
+});
+
+// ---------------------------------------------------------------------------
+// buildReconReport — matching totals
+// ---------------------------------------------------------------------------
+
+test('billing: recon matching totals return ok: true and discrepancy: 0', () => {
+  // DB has 100 cents cleared (1,000,000 micros); Stripe has one PI for 100 cents.
+  const report = buildReconReport({
+    dbTotalMicros:        1_000_000,
+    dbCount:              1,
+    stripePaymentIntents: [
+      { amount: 100, metadata: { source: 'lumaline' }, status: 'succeeded' },
+    ],
+    from: '2026-06-01T00:00:00.000Z',
+    to:   '2026-06-30T23:59:59.999Z',
+  });
+  assert.equal(report.ok, true, 'matched totals must produce ok: true');
+  assert.equal(report.discrepancy_micros, 0);
+  assert.equal(report.db_total_micros,    1_000_000);
+  assert.equal(report.stripe_total_micros, 1_000_000);
+  assert.equal(report.db_count,   1);
+  assert.equal(report.stripe_count, 1);
+});
+
+// ---------------------------------------------------------------------------
+// buildReconReport — DB > Stripe (unbilled or failed charge)
+// ---------------------------------------------------------------------------
+
+test('billing: recon DB > Stripe returns ok: false with positive discrepancy', () => {
+  // DB has 200 cents cleared; Stripe only has 100 cents — a 100-cent billing gap.
+  const report = buildReconReport({
+    dbTotalMicros:        2_000_000,
+    dbCount:              2,
+    stripePaymentIntents: [
+      { amount: 100, metadata: { source: 'lumaline' }, status: 'succeeded' },
+    ],
+    from: '2026-06-01T00:00:00.000Z',
+    to:   '2026-06-30T23:59:59.999Z',
+  });
+  assert.equal(report.ok, false, 'DB > Stripe must produce ok: false');
+  assert.equal(report.discrepancy_micros, 1_000_000, 'discrepancy = db - stripe');
+  assert.equal(report.db_total_micros,    2_000_000);
+  assert.equal(report.stripe_total_micros, 1_000_000);
+});
+
+// ---------------------------------------------------------------------------
+// buildReconReport — Stripe > DB (over-billing bug)
+// ---------------------------------------------------------------------------
+
+test('billing: recon Stripe > DB returns ok: false with negative discrepancy', () => {
+  // Stripe shows more than DB cleared — should never happen in practice but must flag red.
+  const report = buildReconReport({
+    dbTotalMicros:        500_000,
+    dbCount:              1,
+    stripePaymentIntents: [
+      { amount: 100, metadata: { source: 'lumaline' }, status: 'succeeded' },
+    ],
+    from: '2026-06-01T00:00:00.000Z',
+    to:   '2026-06-30T23:59:59.999Z',
+  });
+  assert.equal(report.ok, false, 'Stripe > DB must produce ok: false');
+  assert.equal(report.discrepancy_micros, -500_000, 'discrepancy = db - stripe (negative)');
+});
+
+// ---------------------------------------------------------------------------
+// buildReconReport — empty both sides
+// ---------------------------------------------------------------------------
+
+test('billing: recon empty DB and empty Stripe returns ok: true with all zeros', () => {
+  const report = buildReconReport({
+    dbTotalMicros:        0,
+    dbCount:              0,
+    stripePaymentIntents: [],
+    from: '2020-01-01T00:00:00.000Z',
+    to:   '2020-01-31T23:59:59.999Z',
+  });
+  assert.equal(report.ok, true, 'empty period must produce ok: true');
+  assert.equal(report.discrepancy_micros,  0);
+  assert.equal(report.db_total_micros,     0);
+  assert.equal(report.stripe_total_micros, 0);
+  assert.equal(report.db_count,     0);
+  assert.equal(report.stripe_count, 0);
+});
+
+// ---------------------------------------------------------------------------
+// buildReconReport — non-lumaline PIs are excluded from the Stripe total
+// ---------------------------------------------------------------------------
+
+test('billing: recon non-lumaline Stripe PIs are excluded (source !== lumaline)', () => {
+  // A PI from a different product must not inflate the LumaLine Stripe total.
+  const report = buildReconReport({
+    dbTotalMicros:        0,
+    dbCount:              0,
+    stripePaymentIntents: [
+      { amount: 500, metadata: { source: 'other_product' }, status: 'succeeded' },
+      { amount: 200, metadata: {},                           status: 'succeeded' },
+      { amount: 100, metadata: { source: 'lumaline' },       status: 'succeeded' },
+    ],
+    from: '2026-06-01T00:00:00.000Z',
+    to:   '2026-06-30T23:59:59.999Z',
+  });
+  // Only the 100-cent lumaline PI counts → 100 * 10000 = 1,000,000 micros.
+  assert.equal(report.stripe_total_micros, 1_000_000, 'only lumaline PIs should be counted');
+  assert.equal(report.stripe_count, 1, 'non-lumaline PIs must not be counted');
+  assert.equal(report.ok, false, 'db=0 vs stripe=1000000 should produce ok: false');
+});
+
+// ---------------------------------------------------------------------------
+// buildReconReport — non-succeeded PIs (declined) are excluded
+// ---------------------------------------------------------------------------
+
+test('billing: recon declined Stripe PIs are excluded (status !== succeeded)', () => {
+  // A card-declined PI must NOT count on the Stripe side — it signals a failed
+  // collection, so the report should show DB > Stripe (red), not green.
+  const report = buildReconReport({
+    dbTotalMicros:        1_000_000,  // cleared entry exists
+    dbCount:              1,
+    stripePaymentIntents: [
+      { amount: 100, metadata: { source: 'lumaline' }, status: 'requires_payment_method' },
+      { amount: 100, metadata: { source: 'lumaline' }, status: 'canceled' },
+    ],
+    from: '2026-06-01T00:00:00.000Z',
+    to:   '2026-06-30T23:59:59.999Z',
+  });
+  assert.equal(report.stripe_total_micros, 0, 'non-succeeded PIs must not inflate Stripe total');
+  assert.equal(report.stripe_count, 0);
+  assert.equal(report.ok, false, 'declined PIs must make report red, not green');
+  assert.equal(report.discrepancy_micros, 1_000_000, 'full DB amount is the discrepancy');
+});
