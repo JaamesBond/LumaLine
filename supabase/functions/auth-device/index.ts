@@ -263,8 +263,12 @@ function activatePage(): string {
   // Embed config as JSON in an inline <script>. JSON.stringify does NOT escape '<' or the JS line
   // separators, so a value containing "</script>" (or U+2028/9) could break out — escape them even
   // though every value here is deploy-time operator config, not user input (defence-in-depth).
+  // Escape '<' and the JS line separators (U+2028/U+2029) so a config value can never break out
+  // of the inline <script>. Built via String.fromCharCode to keep this source pure-ASCII (a raw
+  // U+2028 in a regex literal is itself a parse error). Operator config, not user input \u2014 d-i-d.
+  const LS = String.fromCharCode(0x2028), PS = String.fromCharCode(0x2029);
   const cfg = JSON.stringify({ url: SUPABASE_URL, anon: ANON_KEY, privacy: PRIVACY_URL, tos: TOS_URL })
-    .replace(/</g, "\\u003c").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+    .split("<").join("\\u003c").split(LS).join("\\u2028").split(PS).join("\\u2029");
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Activate a LumaLine device</title>
