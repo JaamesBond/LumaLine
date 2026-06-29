@@ -160,6 +160,7 @@ async function insertCharge(row: ChargeRow): Promise<void> {
 
   const res = await svc("POST", "advertiser_charges", {
     body,
+    query:  "on_conflict=entry_group_id",  // explicit conflict target for resolution=ignore-duplicates
     prefer: "return=minimal,resolution=ignore-duplicates",
   });
   // 200/201/204 = success; 409 = duplicate without resolution header (older PostgREST) = ok.
