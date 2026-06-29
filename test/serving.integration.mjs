@@ -233,13 +233,61 @@ test('T4 — serve_counters increments at window_open', {
 });
 
 // ---------------------------------------------------------------------------
+// T5: Frequency cap — N+1th serve is suppressed when cap=N is reached
+// ---------------------------------------------------------------------------
+test('T5 — frequency cap: N+1th serve suppressed when cap=N reached', {
+  skip: UP ? false : `PostgREST unreachable at ${BASE}`,
+}, async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const jwt = mintDeviceJwt(PUB_A);
+
+  // Read current served count (earlier tests in this session already incremented it).
+  const counter = await svcSelect(
+    `serve_counters?publisher_id=eq.${PUB_A.publisher_id}&line_item_id=eq.${SEEDED_LINE_ITEM_ID}&day=eq.${today}&select=served`,
+  );
+  const currentServed = counter.length > 0 ? Number(counter[0].served) : 0;
+
+  // Set cap = currentServed + 1 → exactly one more serve allowed, then blocked.
+  const patch = await fetch(`${BASE}/line_items?id=eq.${SEEDED_LINE_ITEM_ID}`, {
+    method: 'PATCH',
+    headers: {
+      apikey: SERVICE, Authorization: `Bearer ${SERVICE}`,
+      'content-type': 'application/json', Prefer: 'return=minimal',
+    },
+    body: JSON.stringify({ frequency_cap_per_day: currentServed + 1 }),
+  });
+  if (!patch.ok) throw new Error(`PATCH line_items -> ${patch.status}: ${await patch.text()}`);
+
+  try {
+    // First window_open — cap not yet hit (served=currentServed < cap=currentServed+1).
+    const win1 = await rpc('window_open', { p_activity_snapshot: 'session' }, { jwt });
+    assert.ok(win1.window_id, 'first window opened');
+    assert.ok(!win1.ad?.house, 'first serve is paid creative (cap not yet hit)');
+
+    // Second window_open — cap now hit (served=currentServed+1 = cap).
+    const win2 = await rpc('window_open', { p_activity_snapshot: 'session' }, { jwt });
+    assert.ok(win2.window_id, 'second window opened');
+    assert.equal(win2.ad?.house, true, 'second serve must be house creative (frequency cap hit)');
+  } finally {
+    // Cleanup: reset frequency_cap_per_day to null so later tests are unaffected.
+    await fetch(`${BASE}/line_items?id=eq.${SEEDED_LINE_ITEM_ID}`, {
+      method: 'PATCH',
+      headers: {
+        apikey: SERVICE, Authorization: `Bearer ${SERVICE}`,
+        'content-type': 'application/json', Prefer: 'return=minimal',
+      },
+      body: JSON.stringify({ frequency_cap_per_day: null }),
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // T6: line_item_daily_stats.spent_micros increments at close_window
 // ---------------------------------------------------------------------------
 test('T6 — line_item_daily_stats.spent_micros increments after a credited close', {
   skip: UP ? false : `PostgREST unreachable at ${BASE}`,
 }, async (t) => {
-  t.todo('requires a full dwell which adds ~6s; enable with SERVING_SLOW_TESTS=1');
-  if (!process.env.SERVING_SLOW_TESTS) return;
+  if (!process.env.SERVING_SLOW_TESTS) { t.skip('set SERVING_SLOW_TESTS=1 to run'); return; }
 
   const jwt = mintDeviceJwt(PUB_A);
   const today = new Date().toISOString().slice(0, 10);
@@ -273,8 +321,7 @@ test('T7 — sentinel window credits with gross=0 (honest billing invariant)', {
     : !SENTINEL_SEEDED ? 'sentinel not in dev seed (apply seed.prod.sql to test this gate)'
     : false,
 }, async (t) => {
-  t.todo('requires a full dwell which adds ~6s; enable with SERVING_SLOW_TESTS=1');
-  if (!process.env.SERVING_SLOW_TESTS) return;
+  if (!process.env.SERVING_SLOW_TESTS) { t.skip('set SERVING_SLOW_TESTS=1 to run'); return; }
 
   const jwt = mintDeviceJwt(SENTINEL);
   const win = await rpc('window_open', { p_activity_snapshot: 'session' }, { jwt });
