@@ -18,6 +18,7 @@ import {
   FETCH_TIMEOUT_MS, COOLDOWN_MS, HYPERLINKS, SHOW_URL, COLOR, COLOR_RESET,
 } from './config.mjs';
 import { step } from './client/window.mjs';
+import { getValidAccessToken } from './client/auth.mjs';
 import { loadKeyring } from './lib/keyring.mjs';
 import { safeClickUrl } from './lib/url.mjs';
 
@@ -59,12 +60,18 @@ function baseStatus(claude) {
   return (dir ? `${model} · ${dir}` : model) || 'lumaline: idle';
 }
 
+// Set once per tick in main(): a valid device access token (logged-in publisher) or null
+// (anonymous → the feed mints the sentinel, gross=0). It rides ONLY as the Authorization
+// bearer; it is never written to the audit log or any outbound body (data-minimization).
+let authToken = null;
+
 async function post(p, body) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
   try {
     const res = await fetch(`${FEED_BASE}${p}`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(authToken ? { authorization: `Bearer ${authToken}` } : {}) },
       body: JSON.stringify(body), signal: ctrl.signal,
     });
     let out = {};
@@ -80,6 +87,10 @@ async function main() {
   const base = baseStatus(claude);
   const activity = activitySignal(claude);
   const state = loadJson(STATE, null);
+  // Attribution: if a publisher is logged in, attach their short-lived device token so credit
+  // binds to their publisher_id; otherwise stay anonymous (sentinel). Never throws (the hot
+  // path degrades to anonymous on any error), and only hits the network near token expiry.
+  try { authToken = await getValidAccessToken({ now }); } catch { authToken = null; }
   let r;
   try {
     r = await step({ state, now, activity, post, cfg: { cooldownMs: COOLDOWN_MS, verifyAd, showUrl: SHOW_URL } });
