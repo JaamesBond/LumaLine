@@ -387,9 +387,22 @@ Deno.serve(async (req) => {
       }
     }
 
+    // Split the previously-conflated total into an honest per-outcome breakdown.
+    // `charged` now means "actual successful charges" (was: results.length, which
+    // also counted skipped + failed + dry-run rows). Old clients reading a numeric
+    // `charged` still work; new clients should read `counts`.
+    const counts = {
+      succeeded:    results.filter((r) => r.status === "succeeded").length,
+      skipped:      results.filter((r) => r.status === "skipped").length,
+      failed:       results.filter((r) => r.status === "failed").length,
+      would_charge: results.filter((r) => r.would_charge === true).length,
+    };
+
     return jsonOk({
-      charged:  results.length,
-      dry_run:  dryRun,
+      charged:   counts.succeeded,
+      processed: results.length,
+      counts,
+      dry_run:   dryRun,
       results,
     });
   }
