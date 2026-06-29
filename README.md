@@ -210,6 +210,7 @@ docs/                   design, feasibility, GTM
 - [**Verification & economics design**](docs/superpowers/specs/2026-06-27-verification-and-economics-design.md) — the proof-of-dwell protocol, the honest threat model, and CPVA/CPC pricing.
 - [**Why this is honest**](docs/gtm/why-this-is-honest.md) — the one-page differentiator vs. invasive monetizers.
 - [**Privacy Policy**](docs/legal/privacy-policy.md) · [**Publisher Terms**](docs/legal/publisher-tos.md) — what login collects (UUID-only token, salted IP hash, nothing else) and the earnings-accrual-vs-payout timing. *(v1.0, in force.)*
+- [**Advertising Policy**](docs/legal/ad-policy.md) · [**Advertiser Terms**](docs/legal/advertiser-tos.md) — content standards, billing terms, clawback/refund policy, and the data-minimized impression model. *(v1.0 draft — in effect upon owner sign-off.)*
 
 ---
 
@@ -224,9 +225,7 @@ docs/                   design, feasibility, GTM
   token; earnings accrue (payouts still gated to the production go-live). Privacy Policy + Publisher
   Terms are **approved and in force**; live once the login backend is deployed (migration + the
   `auth-device` function + Resend email for `/activate`).
-- 🚧 **Before GA earnings:** real advertiser onboarding, Stripe Connect payouts, the remaining legal
-  (ad policy), a branded feed domain, and an npm registry publish (`0.1.0`, superseding the `0.0.1`
-  reservation stub).
+- 🚧 **Before GA earnings:** real advertiser billing (Stripe test-mode charge + ledger reconciliation), Stripe Connect payouts, a branded feed domain, and an npm registry publish (`0.1.0`, superseding the `0.0.1` reservation stub). Ad Policy + Advertiser Terms are drafted (v1.0) and linked above.
 - ⚠️ **Clickable links are terminal-dependent (open upstream bug):** the status-bar link is clickable
   in **IDE terminals** (VS Code/Cursor) but currently **not in standalone terminal emulators** (foot,
   kitty, Konsole, iTerm2, Alacritty) — an open Claude Code regression
