@@ -85,3 +85,10 @@ insert into public.creatives (id, line_item_id, line, dest_url, label, status) v
    'LumaLine — honest, signed ads for Claude Code',
    'https://luma-line.lovable.app', 'sponsored', 'active')
 on conflict (id) do nothing;
+
+-- M2-T3: dev-a is the admin user for local dev + integration tests.
+-- The admin-booking edge function checks app.admins via forwardRpc('admin_check').
+-- In production, admin rows are seeded out-of-band (service_role/SQL only).
+insert into app.admins (auth_user_id) values
+  ('11111111-1111-1111-1111-111111111111')
+on conflict (auth_user_id) do nothing;

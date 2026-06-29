@@ -418,6 +418,12 @@ verify_jwt = false
 [functions.auth-device]
 verify_jwt = false
 
+# admin-booking — admin-only ad booking CRUD (M2-T3). verify_jwt=false because the
+# function manages auth itself via forwardRpc('admin_check') — PostgREST verifies the
+# caller's JWT and admin_check() checks app.admins. No SUPABASE_JWT_SECRET dependency.
+[functions.admin-booking]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327
