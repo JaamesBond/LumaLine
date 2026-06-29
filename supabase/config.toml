@@ -424,6 +424,12 @@ verify_jwt = false
 [functions.admin-booking]
 verify_jwt = false
 
+# billing — admin-only (or cron-triggered) Stripe charge cycle (M2-T4). verify_jwt=false
+# because the function manages auth itself via forwardRpc('admin_check'), same pattern as
+# admin-booking. Stripe key is in Supabase secrets (STRIPE_SECRET_KEY=sk_test_...).
+[functions.billing]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327
