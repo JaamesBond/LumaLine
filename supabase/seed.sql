@@ -61,9 +61,9 @@ insert into public.devices (id, publisher_id, label, client_version, attested, r
    'anon sentinel (shared, never paid)', '0.1.0', false, null)
 on conflict (id) do nothing;
 
-insert into public.advertisers (id, name, status) values
-  ('5e470000-0000-4000-8000-00000000a001', 'LumaLine (self-promo)', 'active')
-on conflict (id) do nothing;
+insert into public.advertisers (id, name, status, is_house) values
+  ('5e470000-0000-4000-8000-00000000a001', 'LumaLine (self-promo)', 'active', true)
+on conflict (id) do update set is_house = true;
 
 insert into public.campaigns (id, advertiser_id, name, status) values
   ('5e470000-0000-4000-8000-00000000c001', '5e470000-0000-4000-8000-00000000a001',
