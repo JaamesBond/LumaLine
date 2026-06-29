@@ -11,8 +11,8 @@
 These Terms govern your participation as a **publisher** in LumaLine — the
 `lumaline` tool that shows a clearly-labeled, signed, sponsored line in the
 Claude Code status bar and pays you for verified ad views. "We"/"us"/"LumaLine"
-means **OWNER-TODO: legal entity name**. "You"/"publisher" means the developer
-who installs LumaLine and logs in.
+means **Aivora SRL** (Romania). "You"/"publisher" means the developer who
+installs LumaLine and logs in.
 
 By logging in (`lumaline login`) and running LumaLine to earn, you agree to these
 Terms. If you do not agree, do not log in; you may still run LumaLine
@@ -83,27 +83,24 @@ This section is important — please read it carefully.
   identity, and any revoked or expired device, accrue **$0**. Only verified
   views from a logged-in, active device accrue.
 - **Currency and minimums.** Earnings are tracked in micro-USD. When payouts go
-  live, a minimum payout threshold and payout schedule will apply
-  (**OWNER-TODO: confirm minimum payout amount and schedule** — the current code
-  default is a US$25.00 minimum, to be confirmed at go-live).
+  live, a minimum payout threshold of **US$25.00** applies; the payout schedule is
+  confirmed at go-live.
 - **Taxes.** You are responsible for any taxes on amounts you receive, and for
   providing any tax information we are required to collect.
 
 ## 5. Revenue split
 
 Cleared advertiser revenue is shared on a **transparent, publisher-favored
-split**. The current design pays the **publisher 60%** of cleared gross revenue
-for their verified delivery, with the platform retaining 40%
-(**OWNER-TODO: confirm the exact revenue-split percentage if it should be
-restated**). The split is computed in integer micro-USD at clearing time. We will
-give reasonable notice before changing the split.
+split**: the **publisher receives 60%** of cleared gross revenue for their
+verified delivery, and the platform retains 40%. The split is computed in integer
+micro-USD at clearing time. We will give reasonable notice before changing the
+split.
 
 ## 6. Clearing and clawback (invalid traffic)
 
 - **Clearing window.** Earnings are recorded as **provisional** when a view or
   click occurs and become **cleared** only after a clawback window of
-  **72 hours** (**OWNER-TODO: confirm clawback window if different**), provided
-  they were not flagged as invalid traffic.
+  **72 hours**, provided they were not flagged as invalid traffic.
 - **Clawback.** If we determine (reasonably and in good faith) that traffic was
   invalid, fraudulent, or in breach of these Terms — whether before or after
   clearing — we may **reverse the associated earnings** and mark them clawed
@@ -128,8 +125,8 @@ may dispute it by contacting **OWNER-TODO: support/disputes contact email** with
 the relevant details (e.g. dates, window ids, amounts from your ledger or audit
 log).
 
-- We will **acknowledge and respond within OWNER-TODO: N business days**
-  (suggested default: **5 business days**) of receiving a complete dispute.
+- We will **acknowledge and respond within 5 business days** of receiving a
+  complete dispute.
 - We will review the relevant records and our fraud determinations in good faith
   and tell you the outcome and our reasoning.
 - This process does not limit any rights you have under applicable law.
@@ -163,9 +160,8 @@ or for lost profits or lost earnings, arising out of or relating to these Terms
 or your use of LumaLine. To the maximum extent permitted by law, our total
 aggregate liability to you for all claims relating to LumaLine will not exceed the
 greater of (a) the total cleared, payable earnings actually owed to you at the
-time the claim arose, or (b) **OWNER-TODO: a stated cap amount, e.g. US$100**.
-Some jurisdictions do not allow certain limitations, so some of the above may not
-apply to you.
+time the claim arose, or (b) **US$100**. Some jurisdictions do not allow certain
+limitations, so some of the above may not apply to you.
 
 ## 12. Changes to these Terms
 
@@ -176,25 +172,25 @@ Continued participation after an update means you accept the revised Terms.
 
 ## 13. Governing law
 
-These Terms are governed by the laws of **OWNER-TODO: governing law /
-jurisdiction**, without regard to conflict-of-laws rules, and any disputes will
-be resolved in the courts of that jurisdiction (or as otherwise required by
-applicable consumer-protection law).
+These Terms are governed by the laws of **Romania**, without regard to
+conflict-of-laws rules, and any disputes will be resolved in the courts of that
+jurisdiction (or as otherwise required by applicable consumer-protection law).
+*(Confirm with counsel — kept consistent with the Privacy Policy's jurisdiction.)*
 
 ## 14. Contact
 
-- **Support / disputes:** OWNER-TODO: support contact email
-- **Legal entity:** OWNER-TODO: legal entity name + registered address
+- **Support / disputes:** OWNER-TODO: support/disputes contact email
+- **Legal entity:** Aivora SRL (Romania) — registered address **OWNER-TODO**
 
 ---
 
 ### OWNER-TODO checklist (must be resolved before publishing)
 
-- [ ] Legal entity name + registered address
+- [x] Legal entity name — **Aivora SRL** · [ ] registered address still needed
 - [ ] Support / disputes contact email
-- [ ] Governing law / jurisdiction
-- [ ] Dispute-response SLA (business days) — default suggested: 5
-- [ ] Minimum payout amount + payout schedule at go-live (code default: US$25.00)
-- [ ] Confirm/restate the revenue-split percentage (current design: 60% publisher)
-- [ ] Confirm the clawback/clearing window (current design: 72 hours)
-- [ ] Liability cap amount (if a fixed cap is desired)
+- [x] Governing law / jurisdiction — Romania (confirm with counsel)
+- [x] Dispute-response SLA — **5 business days**
+- [x] Minimum payout — **US$25.00** (schedule confirmed at go-live)
+- [x] Revenue split — **60% publisher / 40% platform**
+- [x] Clawback / clearing window — **72 hours**
+- [x] Liability cap — **US$100**

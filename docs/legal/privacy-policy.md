@@ -1,9 +1,4 @@
-> **DRAFT — pending legal review.** This document is an engineering-authored
-> draft prepared for the owner's legal review and sign-off. It has **not** been
-> reviewed by a lawyer and is **not** in force. Do not publish or rely on it
-> until the owner has completed the OWNER-TODO items at the bottom and obtained
-> legal approval.
-
+> 
 # LumaLine Privacy Policy
 
 **Last updated:** 2026-06-29 · **Status:** Draft v0.1
@@ -43,11 +38,11 @@ the code actually does — not an aspirational version of it.
 
 ## 2. Who we are
 
-LumaLine is operated by **OWNER-TODO: legal entity name and registered address**.
-For privacy questions or to exercise your rights, contact
-**OWNER-TODO: privacy contact email**. If we are required to designate an EU/UK
-representative under the GDPR, that representative is
-**OWNER-TODO: EU/UK representative (name + contact), or "not yet appointed"**.
+LumaLine is operated by **Aivora SRL** (Romania); registered address:
+**OWNER-TODO: registered address**. For privacy questions or to exercise your
+rights, contact **patrascu.matei03@gmail.com**. Aivora SRL is established in the
+EU (Romania); a separate GDPR Article 27 EU/UK representative is therefore
+generally **not required** (confirm with counsel).
 
 ---
 
@@ -175,11 +170,18 @@ ad targeting based on your activity.
 - **Advertisers** receive only **aggregate delivery statistics** (e.g. how many
   verified views/clicks a campaign got and what it owes). They never receive
   publisher identities, handles, IPs, device ids, or any personal data.
-- **Service providers / sub-processors** that operate our infrastructure (for
-  example, our database/hosting provider and, once payouts go live, our payments
-  processor) process data on our behalf under contract, only to run the service.
-  **OWNER-TODO: list named sub-processors (e.g. hosting provider, payments
-  provider) once finalized.**
+- **Service providers / sub-processors** process data on our behalf under
+  contract, only to run the service:
+  - **Supabase** — database, authentication, edge functions, and secret storage,
+    hosted on **Amazon Web Services (AWS)** infrastructure. Holds your account
+    record, earnings ledger, and the salted IP hash.
+  - **Stripe** — payment processing and publisher payouts (active once payouts go
+    live). Processes payout-account details.
+  - **Email delivery provider** — sends the one-time sign-in code during
+    `lumaline login` (login verification only). **OWNER-TODO: name the provider
+    once selected (e.g. Resend, Postmark, or Amazon SES).**
+
+  We use no other sub-processors, and we update this list before any change.
 - We may disclose data if **required by law** (valid legal process) or to protect
   the rights, safety, or security of LumaLine, our users, or the public.
 
@@ -187,17 +189,17 @@ ad targeting based on your activity.
 
 ## 8. Retention
 
-These are proposed defaults; the owner should confirm or adjust the exact
-windows (**OWNER-TODO: confirm retention periods**):
+Retention is tiered by purpose (subject to legal review):
 
 - **Rate-limit counters** (salted IP hash + per-minute count): pruned within
-  about **5 minutes** — they exist only for the current minute's budget.
+  about **5 minutes** — they exist only for the current minute's budget. These
+  are an abuse/cost guard, **not** the record that proves a view.
 - **Raw operational data** (transient window state and similar short-lived
-  records): retained for up to **OWNER-TODO: e.g. 90 days**, then deleted or
-  aggregated.
-- **Impression/click records and the earnings ledger**: retained for as long as
-  your account is active and thereafter for **OWNER-TODO: e.g. 7 years** to meet
-  accounting, tax, and audit obligations, then deleted or anonymized.
+  records): retained for up to **90 days**, then deleted or aggregated.
+- **Impression/click records and the earnings ledger** (the verified-delivery and
+  billing record): retained for as long as your account is active and thereafter
+  for **7 years** to meet accounting, tax, and audit obligations, then deleted or
+  anonymized.
 - **Account records**: retained while your account exists; deleted or anonymized
   after account closure subject to the accounting retention above.
 
@@ -238,7 +240,7 @@ To exercise these rights, see §11.
   revoking the device (`lumaline logout`) and uninstalling (`lumaline uninstall`).
   Revoked devices and the anonymous sentinel identity send and accrue nothing.
   You can also delete your local audit log yourself.
-- **Requests to us:** email **OWNER-TODO: privacy contact email** with your
+- **Requests to us:** email **patrascu.matei03@gmail.com** with your
   request (access, correction, deletion, or portability). We will respond within
   the period required by applicable law (generally within **30 days** for GDPR /
   **45 days** for CCPA, with any permitted extension). We may need to verify that
@@ -286,19 +288,18 @@ policy.
 
 ## 15. Contact
 
-- **Privacy / data requests:** OWNER-TODO: privacy contact email
-- **Legal entity:** OWNER-TODO: legal entity name + registered address
-- **EU/UK representative (if required):** OWNER-TODO: representative details, or
-  "not yet appointed"
-- **Governing jurisdiction for this policy:** OWNER-TODO: jurisdiction
+- **Privacy / data requests:** patrascu.matei03@gmail.com
+- **Legal entity:** Aivora SRL (Romania) — registered address **OWNER-TODO**
+- **EU/UK representative:** not required (EU-established controller) — confirm with counsel
+- **Governing jurisdiction for this policy:** Romania
 
 ---
 
 ### OWNER-TODO checklist (must be resolved before publishing)
 
-- [ ] Legal entity name + registered address
-- [ ] Privacy contact email
-- [ ] EU/UK representative (name + contact) or confirmation none is required
-- [ ] Governing jurisdiction
-- [ ] Named sub-processors (hosting, payments, etc.)
-- [ ] Confirm/adjust retention windows (raw operational data; ledger/accounting)
+- [x] Legal entity name — **Aivora SRL** · [ ] registered address still needed
+- [x] Privacy contact email — patrascu.matei03@gmail.com *(consider a role address on your domain)*
+- [x] EU/UK representative — not required (EU-established); confirm with counsel
+- [x] Governing jurisdiction — Romania
+- [x] Named sub-processors — Supabase (on AWS), Stripe, email provider · [ ] name the specific email vendor
+- [x] Retention windows set — rate-limit ~5min, raw operational 90d, ledger/accounting 7y
