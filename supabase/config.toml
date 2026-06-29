@@ -410,6 +410,14 @@ verify_jwt = false
 [functions.lumaline-feed]
 verify_jwt = false
 
+# auth-device — the publisher LOGIN surface (RFC 8628 device-code: /device/code|token|refresh|
+# logout, /earnings, /activate). verify_jwt MUST be false: /device/code carries no bearer, and
+# the authenticated endpoints (/earnings, /device/logout) forward the caller's bearer to
+# PostgREST, which verifies it. It mints the real per-publisher device JWT (HS256, same secret
+# the gateway trusts) and drives the device-code RPCs as service_role.
+[functions.auth-device]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327

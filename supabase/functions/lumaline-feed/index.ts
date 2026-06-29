@@ -24,7 +24,7 @@
 //     creative (click_resolve), never asserted by this function or echoed from the request.
 //   * verify_jwt = false (this is the only public entrypoint; see supabase/config.toml).
 import { corsHeaders, json } from "../_shared/cors.ts";
-import { forwardRpc } from "../_shared/jwt.ts";
+import { forwardRpc, bearerHeader, verifyDeviceJwt } from "../_shared/jwt.ts";
 
 // Sentinel identity — matches supabase/seed.prod.sql. Not a secret (it is the "anon, never
 // paid" publisher); env-overridable for flexibility, defaults to the seeded UUIDs.
@@ -56,6 +56,26 @@ function jwtKey(): Promise<CryptoKey> {
   }
   return jwtKeyPromise;
 }
+// Choose the identity this request forwards under. M1: if the caller presents a VALID device
+// JWT (verified HS256 against the same LUMALINE_JWT_SECRET the gateway trusts, unexpired, with
+// real publisher_id + device_id claims that are NOT the sentinel), forward THAT token so credit
+// binds to the real publisher. Otherwise mint the anonymous sentinel JWT (gross=0). We verify
+// here only to DECIDE which token to forward; PostgREST re-verifies + the RPCs re-check
+// devices.revoked_at on every call, so this is a routing choice, not the security boundary.
+async function chooseAuth(req: Request): Promise<{ auth: string; isReal: boolean }> {
+  const hdr = bearerHeader(req);
+  if (hdr) {
+    const claims = await verifyDeviceJwt(hdr.replace(/^Bearer\s+/i, ""), Deno.env.get("LUMALINE_JWT_SECRET") ?? "");
+    if (
+      claims && typeof claims.publisher_id === "string" && typeof claims.device_id === "string" &&
+      claims.publisher_id !== SENTINEL.publisher_id
+    ) {
+      return { auth: hdr, isReal: true };
+    }
+  }
+  return { auth: `Bearer ${await mintSentinelJwt()}`, isReal: false };
+}
+
 async function mintSentinelJwt(): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   const header = b64urlStr(JSON.stringify({ alg: "HS256", typ: "JWT" }));
@@ -134,7 +154,8 @@ Deno.serve(async (req) => {
   try { body = await req.json(); } catch { /* empty body ok */ }
 
   let auth: string;
-  try { auth = `Bearer ${await mintSentinelJwt()}`; }
+  let isReal: boolean;
+  try { ({ auth, isReal } = await chooseAuth(req)); }
   catch (e) { return json({ error: "feed misconfigured", detail: (e as Error).message }, 500); }
 
   // ---- open: forward RPC, then SIGN + reshape to the client's camelCase envelope ----
@@ -149,7 +170,14 @@ Deno.serve(async (req) => {
     if (!(await rateLimitOk(req, auth))) return json({ error: "rate limited" }, 429);
 
     const snapshot = (body?.activitySnapshot as string) ?? "session";
-    const { status, text } = await forwardRpc("window_open", { p_activity_snapshot: snapshot }, auth);
+    let { status, text } = await forwardRpc("window_open", { p_activity_snapshot: snapshot }, auth);
+    // Honest fallback: a real device token that the RPC rejects (revoked/unknown device, or a
+    // token the gateway expired) must not blank the line. Retry the open under the sentinel so
+    // the user still sees a gross=0 ad — nothing accrues to them, nothing accrues to anyone.
+    if (status !== 200 && isReal) {
+      const sentinel = `Bearer ${await mintSentinelJwt()}`;
+      ({ status, text } = await forwardRpc("window_open", { p_activity_snapshot: snapshot }, sentinel));
+    }
     if (status !== 200) return new Response(text, { status, headers: { ...corsHeaders, "content-type": "application/json" } });
 
     let rpc: Record<string, unknown>;
