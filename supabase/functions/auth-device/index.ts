@@ -26,7 +26,7 @@
 //   * Data minimization — the minted JWT carries ONLY UUIDs (sub/publisher_id/device_id); no
 //     email/PII rides in any impression traffic.
 import { corsHeaders, json } from "../_shared/cors.ts";
-import { serviceRpc, forwardRpc, bearerHeader, SUPABASE_URL, ANON_KEY } from "../_shared/jwt.ts";
+import { serviceRpc, forwardRpc, bearerHeader, SUPABASE_URL, ANON_KEY, SERVICE_ROLE_KEY } from "../_shared/jwt.ts";
 
 // Device access JWT TTL. Kept SHORT (15 min) because the client silently refreshes near expiry
 // (src/client/auth.mjs getValidAccessToken), so a short TTL costs nothing — and it bounds the
@@ -249,6 +249,77 @@ Deno.serve(async (req) => {
         windows,
       });
     } catch (e) { return json({ error: "server_error", detail: (e as Error).message }, 500); }
+  }
+
+  // ---- POST /dispute — publisher submits a dispute for one of their impressions ----
+  // Authenticated (publisher device JWT required). The impression must belong to the
+  // calling publisher — verified by fetching it with the caller's JWT under RLS.
+  // Ownership is proved by the RLS query result, never trusted from the request body.
+  // Inserts with service_role after the ownership check so the RLS insert policy
+  // (which checks jwt_claim('publisher_id')) does not interfere.
+  if (path.endsWith("/dispute")) {
+    const auth = bearerHeader(req);
+    if (!auth) return json({ error: "unauthenticated" }, 401);
+
+    const impressionId = String(body.impression_id ?? "").trim();
+    const description  = String(body.description  ?? "").trim();
+    if (!impressionId || !description) {
+      return json({ error: "impression_id and description are required" }, 400);
+    }
+
+    // Verify impression ownership via RLS — RLS policy 'impressions_select_own' scopes the
+    // result to impressions whose publisher_id matches the caller's JWT publisher_id claim.
+    // If the impression doesn't belong to the caller (or doesn't exist), the array is empty.
+    let ownedImpression: { id: string; publisher_id: string } | null = null;
+    try {
+      const impRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/impressions?id=eq.${encodeURIComponent(impressionId)}&select=id,publisher_id&limit=1`,
+        {
+          headers: {
+            "apikey":        ANON_KEY,
+            "authorization": auth,
+            "accept":        "application/json",
+          },
+        },
+      );
+      const rows = await impRes.json();
+      if (Array.isArray(rows) && rows.length > 0) {
+        ownedImpression = rows[0] as typeof ownedImpression;
+      }
+    } catch { /* network error treated as not-found */ }
+
+    if (!ownedImpression) {
+      return json({ error: "impression not found or not accessible" }, 404);
+    }
+
+    // Insert the dispute. Use service_role so the policy check on publisher_id claim
+    // (which comes from the device JWT, not a Supabase Auth JWT) doesn't block the insert.
+    // Ownership is already verified above.
+    const disputeRes = await fetch(`${SUPABASE_URL}/rest/v1/disputes`, {
+      method: "POST",
+      headers: {
+        "apikey":          SERVICE_ROLE_KEY,
+        "Authorization":   `Bearer ${SERVICE_ROLE_KEY}`,
+        "content-type":    "application/json",
+        "Prefer":          "return=representation",
+        "accept":          "application/json",
+      },
+      body: JSON.stringify({
+        publisher_id:  ownedImpression.publisher_id,
+        impression_id: impressionId,
+        description,
+        status:        "open",
+      }),
+    });
+
+    if (!disputeRes.ok) {
+      const detail = await disputeRes.text().catch(() => "");
+      return json({ error: "failed to create dispute", detail }, 500);
+    }
+
+    const rows = await disputeRes.json().catch(() => []);
+    const dispute = Array.isArray(rows) ? rows[0] : rows;
+    return json({ id: dispute?.id ?? null, status: "open" }, 201);
   }
 
   return json({ error: "not found" }, 404);

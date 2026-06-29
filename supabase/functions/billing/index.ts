@@ -333,6 +333,16 @@ Deno.serve(async (req) => {
           status:            "succeeded",
         });
 
+        // Also stamp the impression with the PaymentIntent id so the /refund
+        // endpoint can look it up without joining through ledger_entries.
+        if (entry.impression_id) {
+          await svc("PATCH", "impressions", {
+            body:   { stripe_charge_id: intent.id },
+            query:  `id=eq.${entry.impression_id}`,
+            prefer: "return=minimal",
+          });
+        }
+
         results.push({
           entry_group_id: entry.entry_group_id,
           status:         "succeeded",
@@ -481,6 +491,100 @@ Deno.serve(async (req) => {
       discrepancy_micros:  discrepancyMicros,
       db_count:            dbCount,
       stripe_count:        stripeCount,
+    });
+  }
+
+  // ---- POST /refund -------------------------------------------------------
+  // Admin-only: issue a Stripe refund for an approved clawback review.
+  //
+  // Flow:
+  //   1. Fetch the clawback_review (must be approved, refund_queued=false).
+  //   2. Find the advertiser_charges row for the linked impression (status=succeeded).
+  //   3. Issue stripe.refunds.create({ payment_intent: pi_id, amount: cents, reason: 'fraudulent' }).
+  //   4. Mark clawback_reviews.refund_queued=true + record the Stripe refund id.
+  //
+  // Uses payment_intent (pi_*) — not charge — because T4 stores the PaymentIntent id.
+  // Amount comes from advertiser_charges.amount_cents (what was actually charged),
+  // not recomputed from impression gross, to avoid rounding drift.
+  if (req.method === "POST" && path.endsWith("/refund")) {
+    let refundBody: Record<string, unknown> = {};
+    try { refundBody = await req.json(); } catch { /* empty body ok */ }
+
+    const reviewId = String(refundBody.review_id ?? "").trim();
+    if (!reviewId) return jsonErr("review_id is required", 400);
+
+    // 1. Fetch the clawback_review.
+    const reviewRes = await svc("GET", "clawback_reviews", {
+      query: `id=eq.${reviewId}&status=eq.approved&refund_queued=eq.false&select=*&limit=1`,
+    });
+    if (!reviewRes.ok) {
+      return jsonErr("Failed to fetch clawback_review", reviewRes.status, reviewRes.data);
+    }
+    const reviewRows = reviewRes.data as Array<Record<string, unknown>>;
+    if (!Array.isArray(reviewRows) || reviewRows.length === 0) {
+      return jsonErr("Review not found, not approved, or refund already queued", 404);
+    }
+    const review = reviewRows[0];
+    const impressionId = review.impression_id as string | null;
+    if (!impressionId) {
+      return jsonErr("Review has no linked impression — cannot refund", 422);
+    }
+
+    // 2. Find the succeeded charge for this impression.
+    const chargeRes = await svc("GET", "advertiser_charges", {
+      query: `impression_id=eq.${impressionId}&status=eq.succeeded&select=stripe_charge_id,amount_cents&limit=1`,
+    });
+    if (!chargeRes.ok) {
+      return jsonErr("Failed to fetch advertiser_charges", chargeRes.status, chargeRes.data);
+    }
+    const chargeRows = chargeRes.data as Array<Record<string, unknown>>;
+    if (!Array.isArray(chargeRows) || chargeRows.length === 0) {
+      return jsonErr("No succeeded charge found for this impression — nothing to refund", 404);
+    }
+    const charge = chargeRows[0];
+    const piId        = charge.stripe_charge_id as string | null;
+    const amountCents = Number(charge.amount_cents ?? 0);
+
+    if (!piId) {
+      return jsonErr("Stripe PaymentIntent id missing on advertiser_charges row", 422);
+    }
+    if (amountCents <= 0) {
+      return jsonErr("Charge amount is zero or negative — cannot refund", 422);
+    }
+
+    // 3. Issue the Stripe refund.
+    let stripe: Stripe;
+    try {
+      stripe = getStripe();
+    } catch (err: unknown) {
+      const msg = (err as { message?: string }).message ?? "Stripe not configured";
+      return jsonErr(msg, 503);
+    }
+
+    let refund: { id: string };
+    try {
+      refund = await stripe.refunds.create({
+        payment_intent: piId,
+        amount:         amountCents,
+        reason:         "fraudulent",
+      });
+    } catch (err: unknown) {
+      const msg = (err as { message?: string }).message ?? "Stripe refund failed";
+      return jsonErr(`Stripe refund error: ${msg}`, 502);
+    }
+
+    // 4. Mark the review as refund-queued.
+    await svc("PATCH", "clawback_reviews", {
+      body:   { refund_queued: true, refund_id: refund.id },
+      query:  `id=eq.${reviewId}`,
+      prefer: "return=minimal",
+    });
+
+    return jsonOk({
+      ok:           true,
+      refund_id:    refund.id,
+      amount_cents: amountCents,
+      impression_id: impressionId,
     });
   }
 
