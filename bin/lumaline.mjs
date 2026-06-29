@@ -7,8 +7,13 @@
 //   version     print version
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import os from 'node:os';
 
 const [cmd] = process.argv.slice(2);
+const rest = process.argv.slice(3);
+const opt = (name) => { const i = rest.indexOf(name); return i >= 0 ? rest[i + 1] : undefined; };
+const pkgVersion = () =>
+  JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')).version;
 
 async function main() {
   switch (cmd) {
@@ -20,6 +25,19 @@ async function main() {
       break;
     case 'uninstall':
       (await import('../src/uninstall.mjs')).uninstall();
+      break;
+    case 'login':
+      // Explicit, opt-in (like install): never runs automatically. Attributes future
+      // impressions to the developer's account via a short-lived, revocable device token.
+      await (await import('../src/client/auth.mjs')).login({
+        label: opt('--label') || os.hostname(), clientVersion: pkgVersion(),
+      });
+      break;
+    case 'logout':
+      await (await import('../src/client/auth.mjs')).logout();
+      break;
+    case 'earnings':
+      await (await import('../src/client/auth.mjs')).earnings();
       break;
     case 'doctor':
       await doctor();
@@ -69,7 +87,12 @@ async function doctor() {
 
   console.log('refreshInterval : ' + cfg.REFRESH_SECONDS + 's');
   console.log('hyperlinks      : ' + (cfg.HYPERLINKS ? 'on (OSC 8)' : 'off'));
-  console.log('login / earnings: not yet — anonymous signed self-promo feed (gross=0, never billed). Publisher login + real earnings unlock at GA.');
+  console.log('auth endpoint   : ' + cfg.AUTH_BASE);
+  const a = (await import('../src/client/auth.mjs')).authStatus({});
+  console.log('login           : ' + (a.loggedIn
+    ? 'as ' + (a.handle ?? a.publisherId) + ' (device ' + String(a.deviceId ?? '').slice(0, 8) + '…, token '
+      + (a.expiresInS != null ? a.expiresInS + 's left' : 'no exp') + ')'
+    : 'anonymous — signed self-promo sentinel feed (gross=0, never billed). Run `lumaline login` to attribute earnings.'));
   if (existsSync(cfg.CLAUDE_SETTINGS)) {
     try {
       const s = JSON.parse(readFileSync(cfg.CLAUDE_SETTINGS, 'utf8'));
@@ -85,12 +108,18 @@ function help() {
 Usage:
   lumaline install      Wire the status line into Claude Code (explicit, reversible)
   lumaline uninstall    Remove it, restoring any prior statusLine
+  lumaline login        Log in (device-code) so earnings attribute to your account
+  lumaline logout       Log out: revoke this device, revert to the anonymous sentinel
+  lumaline earnings     Show your accrued earnings (transparent ledger)
   lumaline doctor       Show environment + where Claude Code config lives
   lumaline version      Print version
 
 Notes:
   - Uses only the official statusLine mechanism. No bundle patching.
   - Wiring happens ONLY when you run \`install\` — never automatically on npm install.
+  - Login is opt-in: before it, the line runs anonymously and is never billed.
+    Earnings accrue after login but real payouts begin only at the production go-live.
+  - \`login\` registers a device label (defaults to your machine hostname; \`--label <name>\` to override).
   - Disable clickable links: LUMALINE_HYPERLINKS=0`);
 }
 
