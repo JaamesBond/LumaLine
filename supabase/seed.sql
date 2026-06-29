@@ -36,3 +36,70 @@ insert into public.line_items (id, campaign_id, cpva_bid_micros, cpc_bid_micros,
 insert into public.creatives (id, line_item_id, line, dest_url, label, status) values
   ('c0000000-0000-0000-0000-000000000001', '11000000-0000-0000-0000-000000000001',
    'Matei is the best', 'https://example.com/matei', 'sponsored', 'active');
+
+-- Sentinel identity — mirrored from seed.prod.sql so T1/T7 integration tests pass on
+-- every `supabase db reset`. UUIDs match the SENTINEL const in test/serving.integration.mjs
+-- and the LUMALINE_SENTINEL_* edge-function secrets.
+insert into auth.users (instance_id, id, aud, role, email, encrypted_password,
+    email_confirmed_at, raw_app_meta_data, raw_user_meta_data, created_at, updated_at,
+    confirmation_token, recovery_token, email_change_token_new, email_change)
+values
+  ('00000000-0000-0000-0000-000000000000', '5e470000-0000-4000-8000-000000000001',
+   'authenticated', 'authenticated', 'sentinel@lumaline.local',
+   '', now(),
+   '{"provider":"email","providers":["email"]}', '{"lumaline_sentinel":true}', now(), now(),
+   '', '', '', '')
+on conflict (id) do nothing;
+
+insert into public.publishers (id, auth_user_id, handle, country, status) values
+  ('5e470000-0000-4000-8000-0000000000b1', '5e470000-0000-4000-8000-000000000001',
+   'lumaline-sentinel', 'US', 'active')
+on conflict (id) do nothing;
+
+insert into public.devices (id, publisher_id, label, client_version, attested, revoked_at) values
+  ('5e470000-0000-4000-8000-0000000000d1', '5e470000-0000-4000-8000-0000000000b1',
+   'anon sentinel (shared, never paid)', '0.1.0', false, null)
+on conflict (id) do nothing;
+
+insert into public.advertisers (id, name, status, is_house) values
+  ('5e470000-0000-4000-8000-00000000a001', 'LumaLine (self-promo)', 'active', true)
+on conflict (id) do update set is_house = true;
+
+insert into public.campaigns (id, advertiser_id, name, status) values
+  ('5e470000-0000-4000-8000-00000000c001', '5e470000-0000-4000-8000-00000000a001',
+   'LumaLine launch self-promo', 'active')
+on conflict (id) do nothing;
+
+-- budget_total_micros=0 excludes this line_item from the real-publisher weighted rotation
+-- (0 < 0 = false in the total-budget guard) while the sentinel publisher path bypasses
+-- budget checks entirely. This prevents the zero-bid self-promo from competing with the
+-- seeded paid creative for PUB_A, keeping T3/T4/T5 deterministic.
+insert into public.line_items (id, campaign_id, cpva_bid_micros, cpc_bid_micros, weight,
+    status, start_at, end_at, budget_total_micros) values
+  ('5e470000-0000-4000-8000-00000000f001', '5e470000-0000-4000-8000-00000000c001',
+   0, 0, 1, 'active', now() - interval '1 hour', null, 0)
+on conflict (id) do nothing;
+
+insert into public.creatives (id, line_item_id, line, dest_url, label, status) values
+  ('5e470000-0000-4000-8000-00000000e001', '5e470000-0000-4000-8000-00000000f001',
+   'LumaLine — honest, signed ads for Claude Code',
+   'https://luma-line.lovable.app', 'sponsored', 'active')
+on conflict (id) do nothing;
+
+-- M2-T3: dev-admin is a separate identity from publisher dev-a (11111111...) so that
+-- the admin user is NOT treated as a publisher, which would break the earnings-RLS test
+-- (is_admin() returning true expands RLS to all rows, making A see B's balance).
+-- In production, admin rows are seeded out-of-band (service_role/SQL only).
+insert into auth.users (instance_id, id, aud, role, email, encrypted_password,
+    email_confirmed_at, raw_app_meta_data, raw_user_meta_data, created_at, updated_at,
+    confirmation_token, recovery_token, email_change_token_new, email_change)
+values
+  ('00000000-0000-0000-0000-000000000000', 'a0000000-0000-4000-8000-000000000001',
+   'authenticated', 'authenticated', 'dev-admin@lumaline.local',
+   extensions.crypt('devpassword', extensions.gen_salt('bf')), now(),
+   '{"provider":"email","providers":["email"]}', '{}', now(), now(), '', '', '', '')
+on conflict (id) do nothing;
+
+insert into app.admins (auth_user_id) values
+  ('a0000000-0000-4000-8000-000000000001')
+on conflict (auth_user_id) do nothing;
