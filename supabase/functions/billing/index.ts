@@ -512,6 +512,9 @@ Deno.serve(async (req) => {
 
     const reviewId = String(refundBody.review_id ?? "").trim();
     if (!reviewId) return jsonErr("review_id is required", 400);
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(reviewId)) {
+      return jsonErr("review_id must be a valid UUID", 400);
+    }
 
     // 1. Fetch the clawback_review.
     const reviewRes = await svc("GET", "clawback_reviews", {
