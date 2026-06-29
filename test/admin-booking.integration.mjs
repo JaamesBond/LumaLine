@@ -32,8 +32,10 @@ const SERVICE =
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU';
 const JWT_SECRET = 'super-secret-jwt-token-with-at-least-32-characters-long';
 
-// dev-a (11111111...) is the admin user — row in app.admins via seed.sql.
-const ADMIN_USER_ID    = '11111111-1111-1111-1111-111111111111';
+// dev-admin (a0000000...) is a dedicated admin identity, separate from publisher dev-a
+// (11111111...). Using dev-a as admin broke the earnings-RLS test because is_admin()=true
+// expands RLS to all publishers. Must stay distinct from any publisher auth_user_id.
+const ADMIN_USER_ID    = 'a0000000-0000-4000-8000-000000000001';
 // dev-b (22222222...) is a normal publisher, NOT an admin.
 const NON_ADMIN_USER_ID = '22222222-2222-2222-2222-222222222222';
 // Sentinel house campaign — M2-T2 is_house CHECK must reject non-zero bids.
