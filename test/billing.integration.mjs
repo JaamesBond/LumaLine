@@ -128,6 +128,23 @@ async function isBillingFnUp() {
   } catch { return false; }
 }
 
+/** Check if the T5 recon migration is applied (billing_recon_totals function exists). */
+async function isReconMigrationApplied() {
+  try {
+    const res = await fetch(`${REST_BASE}/rpc/billing_recon_totals`, {
+      method: 'POST',
+      headers: {
+        apikey:          SERVICE,
+        Authorization:   `Bearer ${SERVICE}`,
+        'content-type':  'application/json',
+      },
+      body: JSON.stringify({ from_ts: '2020-01-01T00:00:00Z', to_ts: '2020-01-02T00:00:00Z' }),
+      signal: AbortSignal.timeout(2000),
+    });
+    return res.status === 200;
+  } catch { return false; }
+}
+
 /**
  * Insert a synthetic cleared impression + 3-leg balanced ledger group so the
  * uncharged_advertiser_billings view returns this entry for billing.
@@ -216,9 +233,10 @@ async function cleanupSyntheticEntry({ impressionId, groupId }) {
 // ---------------------------------------------------------------------------
 // Stack reachability checks
 // ---------------------------------------------------------------------------
-const STACK_UP     = await isStackUp();
-const MIGRATION_OK = STACK_UP ? await isMigrationApplied() : false;
-const FN_UP        = MIGRATION_OK ? await isBillingFnUp() : false;
+const STACK_UP          = await isStackUp();
+const MIGRATION_OK      = STACK_UP ? await isMigrationApplied()      : false;
+const FN_UP             = MIGRATION_OK ? await isBillingFnUp()        : false;
+const RECON_MIGR_OK     = STACK_UP ? await isReconMigrationApplied()  : false;
 
 const SKIP_NO_STACK = !STACK_UP
   ? `PostgREST unreachable at ${REST_BASE} — SKIPPING (offline)`
@@ -232,6 +250,9 @@ const SKIP_NO_FN = !FN_UP
 const SKIP_NO_STRIPE = !HAS_STRIPE
   ? `STRIPE_SECRET_KEY not set or not sk_test_* — skipping live Stripe tests`
   : false;
+const SKIP_NO_RECON_MIGRATION = !RECON_MIGR_OK
+  ? `billing_recon_totals function not found — run supabase db reset to apply T5 migration`
+  : false;
 
 if (!STACK_UP) {
   console.log(`[billing.integration] Stack unreachable — SKIPPING all tests.`);
@@ -239,6 +260,8 @@ if (!STACK_UP) {
   console.log(`[billing.integration] T4 migration not applied — SKIPPING all tests.`);
 } else if (!FN_UP) {
   console.log(`[billing.integration] Billing fn not deployed — SKIPPING all tests.`);
+} else if (!RECON_MIGR_OK) {
+  console.log(`[billing.integration] T5 recon migration not applied — recon tests will be skipped.`);
 } else if (!HAS_STRIPE) {
   console.log(`[billing.integration] STRIPE_SECRET_KEY absent — Stripe tests will be skipped.`);
 }
@@ -486,6 +509,122 @@ test('T25 — billing: idempotency — re-run does not create second charge row'
     assert.equal(
       chargeRes.data.length, 1,
       `UNIQUE(entry_group_id) must prevent duplicate rows; got ${chargeRes.data.length} rows`,
+    );
+  } finally {
+    if (impressionId && groupId) {
+      await cleanupSyntheticEntry({ impressionId, groupId });
+    }
+  }
+});
+
+// ===========================================================================
+// M2-T5: Reconciliation endpoint — GET /billing/reconcile?from=&to=
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// T26: Non-admin GET /reconcile returns 403.
+//
+// Auth guard fires before any DB/Stripe query, so no Stripe key is needed.
+// ---------------------------------------------------------------------------
+test('T26 — recon: non-admin GET /reconcile returns 403', {
+  skip: SKIP_NO_STACK || SKIP_NO_MIGRATION || SKIP_NO_FN,
+}, async () => {
+  const res = await fetch(
+    `${BILLING_BASE}/reconcile?from=2020-01-01T00:00:00Z&to=2020-01-31T23:59:59Z`,
+    { headers: { Authorization: `Bearer ${NON_ADMIN_JWT}` } },
+  );
+  assert.equal(res.status, 403, `Expected 403 for non-admin, got ${res.status}`);
+});
+
+// ---------------------------------------------------------------------------
+// T27: Admin GET /reconcile for a far-past period with no data returns ok: true.
+//
+// Reconcile over 2020-01-01..2020-01-02: the DB has no cleared entries from that
+// period and Stripe (test mode) has no PaymentIntents from that date → both sides
+// are 0 → discrepancy = 0 → ok: true.
+//
+// Requires Stripe so the Stripe side can be verified (not just DB = 0).
+// ---------------------------------------------------------------------------
+test('T27 — recon: empty period returns {ok:true, all zeros}', {
+  skip: SKIP_NO_STACK || SKIP_NO_MIGRATION || SKIP_NO_FN || SKIP_NO_RECON_MIGRATION || SKIP_NO_STRIPE,
+}, async () => {
+  const res = await fetch(
+    `${BILLING_BASE}/reconcile?from=2020-01-01T00:00:00Z&to=2020-01-02T00:00:00Z`,
+    { headers: { Authorization: `Bearer ${ADMIN_JWT}` } },
+  );
+  const body = await res.json();
+  assert.equal(res.status, 200, `Expected 200, got ${res.status}: ${JSON.stringify(body)}`);
+
+  // Structural checks — report must have the full reconciliation shape.
+  assert.ok('ok'                  in body, 'report must have ok field');
+  assert.ok('period'              in body, 'report must have period field');
+  assert.ok('db_total_micros'     in body, 'report must have db_total_micros field');
+  assert.ok('stripe_total_micros' in body, 'report must have stripe_total_micros field');
+  assert.ok('discrepancy_micros'  in body, 'report must have discrepancy_micros field');
+  assert.ok('db_count'            in body, 'report must have db_count field');
+  assert.ok('stripe_count'        in body, 'report must have stripe_count field');
+
+  // Both sides must be zero for a period with no data.
+  assert.equal(body.db_total_micros,     0,    'no DB entries in 2020 → db_total_micros must be 0');
+  assert.equal(body.stripe_total_micros, 0,    'no Stripe PIs in 2020 → stripe_total_micros must be 0');
+  assert.equal(body.discrepancy_micros,  0,    'discrepancy must be 0');
+  assert.equal(body.ok,                  true, 'empty period must produce ok: true');
+  assert.equal(body.db_count,            0);
+  assert.equal(body.stripe_count,        0);
+});
+
+// ---------------------------------------------------------------------------
+// T28: Insert a cleared ledger entry without running billing → reconcile is red.
+//
+// Setup:
+//   1. Record t0 just before the insert.
+//   2. Insert a synthetic cleared billing entry ($1.00 = 1,000,000 micros) directly
+//      (bypassing billing), so the DB has a debit but Stripe has no matching PI.
+//   3. Record t1 just after the insert.
+//   4. Reconcile for [t0, t1] — a tight window that captures only this entry.
+//   5. DB total = 1,000,000 micros; Stripe total = 0; discrepancy > 0 → ok: false.
+//
+// Requires Stripe because the endpoint calls stripe.paymentIntents.list().
+// Tests run sequentially and the 1-second window minimises interference.
+// ---------------------------------------------------------------------------
+test('T28 — recon: unbilled cleared entry makes report red (ok: false)', {
+  skip: SKIP_NO_STACK || SKIP_NO_MIGRATION || SKIP_NO_FN || SKIP_NO_RECON_MIGRATION || SKIP_NO_STRIPE,
+}, async () => {
+  let impressionId, groupId;
+  const GROSS_MICROS = 1_000_000;  // $1.00 → above Stripe minimum → would be billed
+
+  // Bracket the insert tightly to isolate this entry from others.
+  const t0 = new Date(Date.now() - 500).toISOString();
+
+  try {
+    const entry = await insertSyntheticBillingEntry({
+      lineItemId:  DEV_LINE_ITEM_ID,
+      publisherId: PUB_A_PUBLISHER_ID,
+      grossMicros: GROSS_MICROS,
+    });
+    impressionId = entry.impressionId;
+    groupId      = entry.groupId;
+
+    const t1 = new Date(Date.now() + 500).toISOString();
+
+    // Reconcile for the tight window — billing was NOT run, so Stripe total = 0.
+    const res = await fetch(
+      `${BILLING_BASE}/reconcile?from=${encodeURIComponent(t0)}&to=${encodeURIComponent(t1)}`,
+      { headers: { Authorization: `Bearer ${ADMIN_JWT}` } },
+    );
+    const body = await res.json();
+    assert.equal(res.status, 200, `Expected 200, got ${res.status}: ${JSON.stringify(body)}`);
+
+    // The entry is in DB but not in Stripe → discrepancy → ok: false.
+    assert.equal(body.ok, false, 'unbilled entry must make report ok: false');
+    assert.ok(
+      body.db_total_micros >= GROSS_MICROS,
+      `db_total_micros must be >= ${GROSS_MICROS}, got ${body.db_total_micros}`,
+    );
+    assert.equal(body.stripe_total_micros, 0, 'no billing run → Stripe total must be 0');
+    assert.ok(
+      body.discrepancy_micros >= GROSS_MICROS,
+      `discrepancy_micros must be >= ${GROSS_MICROS}, got ${body.discrepancy_micros}`,
     );
   } finally {
     if (impressionId && groupId) {

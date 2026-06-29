@@ -43,7 +43,7 @@ import Stripe from "https://esm.sh/stripe@14.21.0?target=deno";
 
 const billingCors = {
   ...corsHeaders,
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 } as const;
 
 function jsonOk(body: unknown, status = 200): Response {
@@ -312,6 +312,7 @@ Deno.serve(async (req) => {
             off_session:    true,
             description:    `LumaLine impression ${entry.impression_id}`,
             metadata: {
+              source:         "lumaline",      // enables /reconcile Stripe-side filter
               impression_id:  entry.impression_id,
               entry_group_id: entry.entry_group_id,
               advertiser_id:  entry.advertiser_id,
@@ -380,6 +381,106 @@ Deno.serve(async (req) => {
       charged:  results.length,
       dry_run:  dryRun,
       results,
+    });
+  }
+
+  // ---- GET /reconcile?from=ISO_DATE&to=ISO_DATE --------------------------------
+  // Admin-only reconciliation: asserts sum(cleared advertiser_billing debits) ==
+  // sum(succeeded Stripe PaymentIntents tagged source=lumaline) for the period.
+  //
+  // Only succeeded PaymentIntents count on the Stripe side — a declined card creates
+  // a Charge/PI object with amount set but status≠succeeded, and should NOT be counted
+  // (it signals a collection failure that should make the report red, not cancel the DB leg).
+  //
+  // Known structural limitation: ledger entries below the $0.50 Stripe minimum are cleared
+  // in the DB but never charged in Stripe → always-red for periods containing sub-minimum
+  // entries. House-advertiser entries are exempt: close_window() zeros their gross and
+  // clear_events() filters gross_micros>0, so house impressions never produce ledger entries.
+  if (req.method === "GET" && path.endsWith("/reconcile")) {
+    const fromStr = url.searchParams.get("from");
+    const toStr   = url.searchParams.get("to");
+    if (!fromStr || !toStr) {
+      return jsonErr("Missing required query params: from, to (ISO 8601)", 400);
+    }
+    const fromDate = new Date(fromStr);
+    const toDate   = new Date(toStr);
+    if (isNaN(fromDate.getTime()) || isNaN(toDate.getTime())) {
+      return jsonErr("Invalid date — use ISO 8601 (e.g. 2026-06-01T00:00:00Z)", 400);
+    }
+    const fromIso = fromDate.toISOString();
+    const toIso   = toDate.toISOString();
+
+    // 1. DB side — call billing_recon_totals via service-role REST RPC.
+    const reconRes = await svc("POST", "rpc/billing_recon_totals", {
+      body: { from_ts: fromIso, to_ts: toIso },
+    });
+    if (!reconRes.ok) {
+      return jsonErr("DB reconcile query failed", reconRes.status, reconRes.data);
+    }
+    const reconRows =
+      (reconRes.data as Array<{ total_micros: unknown; entry_count: unknown }>) ?? [];
+    const dbTotalMicros = Number(reconRows[0]?.total_micros ?? 0);
+    const dbCount       = Number(reconRows[0]?.entry_count  ?? 0);
+
+    // 2. Stripe side — list succeeded PaymentIntents tagged source=lumaline in period.
+    let stripe: Stripe;
+    try {
+      stripe = getStripe();
+    } catch (err: unknown) {
+      const msg = (err as { message?: string }).message ?? "Stripe not configured";
+      return jsonErr(msg, 503);
+    }
+
+    const fromUnix = Math.floor(fromDate.getTime() / 1000);
+    const toUnix   = Math.floor(toDate.getTime()   / 1000);
+
+    let stripeTotalMicros = 0;
+    let stripeCount       = 0;
+    let hasMore           = true;
+    let startingAfter: string | undefined;
+
+    try {
+      while (hasMore) {
+        const params: Stripe.PaymentIntentListParams = {
+          created: { gte: fromUnix, lte: toUnix },
+          limit:   100,
+        };
+        if (startingAfter) params.starting_after = startingAfter;
+
+        const page = await stripe.paymentIntents.list(params);
+
+        for (const pi of page.data) {
+          // Only count succeeded PIs tagged as LumaLine. A declined PI has amount set
+          // but status !== 'succeeded' and must NOT inflate the Stripe total.
+          if (pi.metadata?.source === "lumaline" && pi.status === "succeeded") {
+            // pi.amount is Stripe cents; 1 cent = 10,000 micro-USD.
+            stripeTotalMicros += pi.amount * 10000;
+            stripeCount++;
+          }
+        }
+
+        hasMore = page.has_more;
+        if (hasMore && page.data.length > 0) {
+          startingAfter = page.data[page.data.length - 1].id;
+        } else {
+          hasMore = false;
+        }
+      }
+    } catch (err: unknown) {
+      const msg = (err as { message?: string }).message ?? "Stripe list failed";
+      return jsonErr(`Stripe error: ${msg}`, 502);
+    }
+
+    const discrepancyMicros = dbTotalMicros - stripeTotalMicros;
+
+    return jsonOk({
+      ok:                  discrepancyMicros === 0,
+      period:              { from: fromIso, to: toIso },
+      db_total_micros:     dbTotalMicros,
+      stripe_total_micros: stripeTotalMicros,
+      discrepancy_micros:  discrepancyMicros,
+      db_count:            dbCount,
+      stripe_count:        stripeCount,
     });
   }
 
