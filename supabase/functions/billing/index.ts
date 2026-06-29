@@ -570,7 +570,7 @@ Deno.serve(async (req) => {
         payment_intent: piId,
         amount:         amountCents,
         reason:         "fraudulent",
-      });
+      }, { idempotencyKey: `lumaline_refund_${reviewId}` });
     } catch (err: unknown) {
       const msg = (err as { message?: string }).message ?? "Stripe refund failed";
       return jsonErr(`Stripe refund error: ${msg}`, 502);
