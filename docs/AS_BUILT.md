@@ -197,6 +197,49 @@ repair only reconciles the *history table*, and nothing is blocked in the meanti
 
 ---
 
+## 5a. M1 as-built deltas (publisher login — code complete, owner-gated for live)
+
+Built local-only (no live writes this session) on `feat/m1-publisher-login`; PR open. Sentinel stays
+`gross=0`. New migration `20260629010000_device_code_flow.sql`, new edge fn `auth-device`.
+
+- **M1-T1 — `auth-device` edge fn + the device-code SQL.** RFC 8628: `POST /device/code|token|refresh|logout`,
+  `POST /earnings`, `GET /activate`. The **only** minter of a *real* per-publisher device JWT (HS256 over
+  `LUMALINE_JWT_SECRET`, the same secret PostgREST verifies; claims `role/aud:authenticated`,
+  `sub`=`publishers.auth_user_id`, `publisher_id`, `device_id`; TTL **900s**). Backing RPCs (all
+  `SECURITY DEFINER`, `search_path=''`): `device_code_start/redeem/refresh` (**service_role only**),
+  `device_code_approve`/`device_revoke`/`ensure_publisher` (**authenticated**, anon/public **REVOKED** —
+  Supabase default-priv auto-grant stripped, per [[lumaline-secdef-grant-hardening]]). Only **hashes** of the
+  device_code + refresh token are stored.
+- **M1-T4 — attribution without touching the trust-critical RPCs.** `lumaline-feed` now `chooseAuth()`s: a
+  valid caller device token is forwarded (credit binds to the real `publisher_id`); else the sentinel JWT is
+  minted (`gross=0`). On a real-token `window_open` failure (revoked/expired) it retries under the sentinel so
+  the user still sees a `gross=0` ad. `window_open/beat/close` already re-check `devices.revoked_at` every
+  call — unchanged. The client threads the token as `Authorization: Bearer` only (no new body field; token
+  never logged) — data-minimization preserved.
+- **M1-T3 — zero-dep client login.** `src/client/auth.mjs`: device-code login, **atomic** 0600 token store
+  (temp+rename), silent near-expiry refresh (rotating refresh token), logout (best-effort server revoke +
+  local clear). `bin/lumaline.mjs` gains `login`/`logout`/`earnings`; statusline attaches the token; doctor
+  shows login state. **At-rest store = a 0600 file, not the OS keychain** — deliberate: the statusline runs a
+  fresh process every ~1s and cannot spawn a keychain helper per tick. The token is short-lived + instantly
+  revocable on the billing path. **OWNER follow-up (non-blocking):** OS-keychain hardening that keeps the
+  hot-path read cheap.
+- **M1-T5 — earnings read.** `/earnings` proxies the RLS-scoped `v_publisher_balance` +
+  `v_publisher_window_clearing` with the caller's bearer (anon key stays server-side; no key ships in the
+  client). `lumaline earnings` renders USD + the "payouts begin at go-live" disclosure.
+- **M1-T6 — legal (DRAFT).** `docs/legal/privacy-policy.md` + `publisher-tos.md`, matched to actual data flow
+  (UUID-only token, salted IP hash, coarse activity bucket; the `asn` column is **reserved, not collected** —
+  corrected from an earlier draft). **Owner legal sign-off + the `OWNER-TODO:` placeholders are outstanding.**
+
+**Verified:** `node --test` **73/0**; the device-code flow + attribution + revocation + refresh + earnings-RLS
+proven against a **local Supabase stack** (real Deno runtime + Postgres). Adversarial review: 10 confirmed
+findings, all low/medium, 0 critical/high; 7 fixed, 3 deferred to the ledger (D8–D10).
+
+### Owner gate to take M1 LIVE
+Legal sign-off (BLOCKING); enable Supabase Auth email/SMTP (for `/activate`); apply the migration + deploy
+`auth-device` (`--use-api`) + redeploy `lumaline-feed`; merge the PR. See `MILESTONE_STATUS.md` for the list.
+
+---
+
 ## 6. Deferral ledger
 
 Genuine deferrals, recorded so none is silently lost. Each names the **reason** and the **milestone/owner**
@@ -211,6 +254,9 @@ that closes it.
 | **D5** | **Per-publisher earnings / payouts** (device-code `lumaline login`, attribution off the sentinel, Stripe charging + Connect payouts, money-safety gates, independent security review). | The beta is intentionally **sentinel-only, `gross = 0`, never billed** — *see it live today, not get paid today*. The full money machine is built + proven in **Stripe test mode** before a single real dollar moves, behind legal and security gates. | **M1–M3** (test mode), **M5** (live go-live) |
 | **D6** | **Branded domain + CPC measurement + GA npm publish.** | Installed clients don't self-update, so GA must ship on the **stable branded URL** and **rotation-safe** (the M0 `keyid` work is its hard prerequisite). Until then the beta installs via `npm i -g github:JaamesBond/LumaLine`. CPC is also gated by upstream OSC-8 bug #26356 (clicks in IDE terminals only today). | **M4** |
 | **D7** | **Scale / ops deferrals:** load-test validation of the ~15k writes/s ceiling, richer IVT heuristics (data-min-safe), advertiser API keys, full dashboards/on-call runbook, DR-at-scale. | Not on the money-honesty critical path; the money-critical alerts (ledger-imbalance, payout-failure, reconciliation) land earlier at M3-T6. | **M6** |
+| **D8** | **M1 — orphaned `open` window** when a revoked device's `window_open` is retried under the sentinel (the client keeps sending its real token, so the sentinel window's beats/close 401 and it never closes). | **Harmless:** `gross=0`, never credits, no double-bill, no crash; the access token expires in ≤15 min and the existing Phase-4 `sweep_stale_windows` cron abandons stale-open rows. | **M4/M6** (optional: signal client demotion in the open reply) |
+| **D9** | **M1 — refresh token has no absolute lifetime + no reuse-detection** (OAuth refresh-rotation BCP). | Bounded by the short **900s** access TTL, 0600 at-rest storage, **manual `device_revoke`**, and the per-window `revoked_at` re-check on the billing path. No payouts until M5. | **M3** (security review): add `devices.refresh_expires_at` + superseded-hash reuse detection → auto-revoke device family |
+| **D10** | **M1 — `/earnings` does not re-check `devices.revoked_at`** (a token minted just before logout can read its *own* earnings until exp ≤15 min). | **Self-data only**, RLS-scoped to the caller; zero billing/cross-publisher impact; time-bounded by the short TTL. | **M3** (add a server-side `revoked_at` check on the `/earnings` handler) |
 
 ---
 

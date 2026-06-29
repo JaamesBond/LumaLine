@@ -78,6 +78,22 @@ lumaline install      # explicit, reversible — wires the statusLine into Claud
 lumaline uninstall    # restores your previous statusLine, byte-for-byte
 ```
 
+**Optional — log in so your views earn (opt-in, device-code):**
+
+```bash
+lumaline login        # prints a code + URL; approve in the browser, and impressions attribute to you
+lumaline earnings     # transparent ledger: what you've accrued (USD)
+lumaline logout       # revoke this device; revert to the anonymous (never-billed) line
+```
+
+Login is opt-in and never automatic. Before it, the line runs **anonymously and is never
+billed**. After it, earnings **accrue** to your account — but real **payouts begin only at the
+production go-live**; until then balances are informational. A revoked or expired device falls
+back to the anonymous identity and accrues nothing. The only thing that ever leaves your machine
+on login is a short-lived token carrying just opaque account/device IDs — never your email, code,
+or any content. See the [Privacy Policy](docs/legal/privacy-policy.md) and
+[Publisher Terms](docs/legal/publisher-tos.md).
+
 `install` is the **only** thing that touches your Claude Code settings, and only when *you* run
 it — never automatically on `npm install`. It backs up `~/.claude/settings.json` first and
 remembers any prior `statusLine` for a clean restore.
@@ -93,7 +109,7 @@ npm test              # 34 tests: crypto, dwell protocol, anti-fraud, click trac
 ```
 
 > Note: `demo` is an `npm` script (run from a clone), **not** a `lumaline` subcommand. The
-> installed CLI is `install · uninstall · statusline · doctor · version`.
+> installed CLI is `install · uninstall · login · logout · earnings · statusline · doctor · version`.
 
 ---
 
@@ -193,6 +209,7 @@ docs/                   design, feasibility, GTM
 - [**Ad-surface feasibility**](docs/feasibility/2026-06-26-ad-surface-feasibility.md) — where an ad can live in Claude Code, and why `statusLine` is the sanctioned one.
 - [**Verification & economics design**](docs/superpowers/specs/2026-06-27-verification-and-economics-design.md) — the proof-of-dwell protocol, the honest threat model, and CPVA/CPC pricing.
 - [**Why this is honest**](docs/gtm/why-this-is-honest.md) — the one-page differentiator vs. invasive monetizers.
+- [**Privacy Policy**](docs/legal/privacy-policy.md) · [**Publisher Terms**](docs/legal/publisher-tos.md) — what login collects (UUID-only token, salted IP hash, nothing else) and the earnings-accrual-vs-payout timing. *(Drafts pending owner legal sign-off.)*
 
 ---
 
@@ -202,9 +219,13 @@ docs/                   design, feasibility, GTM
   verify → server-verified dwell window (HMAC heartbeat chain + anti-batch) → recorded impression;
   a reference signed backend; a revenue ledger with clearing/clawback/IVT scan; a 34-test suite.
   The beta feed serves LumaLine's own self-promo line, **`gross = 0`, never billed.**
-- 🚧 **Before GA earnings:** device-code `lumaline login` (so installs attribute + earn), real
-  advertiser onboarding, Stripe Connect payouts, legal (ToS / privacy / ad policy), a branded feed
-  domain, and an npm registry publish (`0.1.0`, superseding the `0.0.1` reservation stub).
+- 🟡 **Built, gated on owner sign-off (M1):** device-code `lumaline login` / `logout` / `earnings`
+  — installs can now attribute impressions to a real publisher via a short-lived, revocable device
+  token; earnings accrue (payouts still gated to the production go-live). Live once the owner signs
+  off the Privacy Policy + Publisher Terms and the login backend is deployed.
+- 🚧 **Before GA earnings:** real advertiser onboarding, Stripe Connect payouts, the remaining legal
+  (ad policy), a branded feed domain, and an npm registry publish (`0.1.0`, superseding the `0.0.1`
+  reservation stub).
 - ⚠️ **Clickable links are terminal-dependent (open upstream bug):** the status-bar link is clickable
   in **IDE terminals** (VS Code/Cursor) but currently **not in standalone terminal emulators** (foot,
   kitty, Konsole, iTerm2, Alacritty) — an open Claude Code regression

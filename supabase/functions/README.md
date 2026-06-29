@@ -30,6 +30,32 @@ stable HTTP paths — **the CLI may also call the PostgREST RPCs directly**
   **only** from `click_resolve` (the booked creative) — a client-supplied URL is never
   read or echoed (no open-redirect surface). It must run with `verify_jwt = false`
   (set in `supabase/config.toml [functions.click]`).
+- **`lumaline-feed`** (anonymous signed feed) now ALSO honors a logged-in caller: if the
+  request carries a valid device JWT (`chooseAuth`), it forwards that token so credit binds to
+  the real publisher; otherwise it mints the **sentinel** JWT (gross=0). On a real-token
+  `window_open` failure (revoked/expired device) it retries under the sentinel, so a revoked
+  device still sees a gross=0 ad rather than a blank line. It still Ed25519-signs every `/open`.
+- **`auth-device`** (M1 — publisher login, `verify_jwt = false`): the RFC 8628 device-code
+  surface and the **only** thing that mints a *real* per-publisher device JWT (the sentinel
+  analogue, same HS256 secret). Routes:
+  - `POST /device/code` → `{ device_code, user_code, verification_uri[,_complete], expires_in, interval }`
+    (service-role `device_code_start`; only the device_code **hash** is stored).
+  - `POST /device/token` → poll. `authorization_pending` until approved; on approval mints the
+    access JWT (`sub`=auth_user_id, `publisher_id`, `device_id`) + returns a rotating
+    `refresh_token` (service-role `device_code_redeem`, one-shot).
+  - `POST /device/refresh` → rotate the refresh token, re-mint a fresh access JWT
+    (`device_refresh`; old refresh hash invalid after use).
+  - `POST /device/logout` → forwards the caller bearer to `device_revoke` (ownership enforced
+    server-side, not from the body).
+  - `POST /earnings` → proxies the RLS-scoped `v_publisher_balance` / `v_publisher_window_clearing`
+    views with the caller's bearer (server holds the anon key; no anon key ships in the client).
+  - `GET /activate` → the human approval page: the developer signs in (Supabase Auth), then it
+    calls `ensure_publisher` + `device_code_approve`. The page embeds only public values
+    (project URL + anon key); the service-role key never appears in it.
+
+  **Owner config for the live login flow:** enable an email auth provider/SMTP on the project
+  (for `/activate` sign-in), set `LUMALINE_VERIFY_URI` if you want a branded approval URL, and set
+  `LUMALINE_PRIVACY_URL` / `LUMALINE_TOS_URL` to the published legal pages.
 
 ## Serve locally
 

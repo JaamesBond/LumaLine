@@ -170,11 +170,14 @@ test('Phase 1 verified-impression hot path (PostgREST, real device-JWT)', {
   });
 
   await t.test('click_resolve: redirects to booked dest and dedupes durably (ONE click row)', async () => {
-    const c1 = await rpc('click_resolve', { p_token: clickToken }); // anon, like the real redirect
+    // The real redirect is anon -> the `click` edge fn -> click_resolve via the SERVICE ROLE
+    // key (serviceRpc). M0's harden_function_grants migration REVOKEd anon EXECUTE on
+    // click_resolve, so we call it as service_role here to mirror that hardened path.
+    const c1 = await rpc('click_resolve', { p_token: clickToken }, { jwt: SERVICE });
     assert.equal(c1.ok, true, 'first click ok');
     assert.equal(c1.dest, EXPECTED_DEST, 'dest is the booked creative dest (server-side)');
 
-    const c2 = await rpc('click_resolve', { p_token: clickToken }); // replay
+    const c2 = await rpc('click_resolve', { p_token: clickToken }, { jwt: SERVICE }); // replay
     assert.equal(c2.ok, true, 'replayed click still redirects');
 
     const clicks = await svcSelect(`clicks?window_id=eq.${windowId}&select=window_id`);

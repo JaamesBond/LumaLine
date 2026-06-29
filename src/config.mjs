@@ -15,6 +15,11 @@ export const PRIV = path.join(KEYS, 'private.pem');                 // backend/d
 export const AD_CACHE = path.join(LUMALINE_HOME, 'ad-cache.json');
 export const STATE = path.join(LUMALINE_HOME, 'impression-state.json');
 export const AUDIT = path.join(LUMALINE_HOME, 'audit.log');
+// Publisher device credential (M1 login). A 0600 JSON file holding the short-lived access
+// token + rotating refresh token + identity (publisher_id/device_id/handle/exp). The
+// per-tick statusline reads this on the hot path, so it must be a cheap local read — see
+// src/client/auth.mjs for the storage rationale (and the OS-keychain hardening follow-up).
+export const DEVICE_TOKEN = path.join(LUMALINE_HOME, 'device-token.json');
 export const BACKEND_LOG = path.join(LUMALINE_HOME, 'backend-impressions.log');
 
 // Trusted verify key: a bundled key ships with the package in prod; fall back to
@@ -35,6 +40,18 @@ export const KEYS_DIR = env.LUMALINE_KEYS_DIR || fileURLToPath(new URL('./keys',
 export const PORT = Number(env.LUMALINE_PORT || 8787);
 export const FEED_BASE = env.LUMALINE_FEED ||
   'https://prmsonskzrubqsazmpwd.supabase.co/functions/v1/lumaline-feed';
+
+// Auth endpoint — the `auth-device` edge function (RFC 8628 device-code login + token
+// refresh + earnings proxy). Defaults to the sibling of FEED_BASE on the same project, so a
+// single LUMALINE_FEED override (e.g. a preview branch) moves both; override independently
+// with LUMALINE_AUTH for local dev. Reuses FEED_BASE's host so login targets the same project
+// the feed serves.
+export const AUTH_BASE = env.LUMALINE_AUTH || FEED_BASE.replace(/\/lumaline-feed\/?$/, '/auth-device');
+
+// Refresh the short-lived device access token this many ms BEFORE it expires, so a window the
+// statusline opens stays attributed for its full dwell. The refresh is best-effort + bounded
+// (FETCH_TIMEOUT_MS); a failure just means the next tick runs anonymous (sentinel, gross=0).
+export const TOKEN_REFRESH_SKEW_MS = Number(env.LUMALINE_TOKEN_SKEW_MS || 300_000);
 
 // Claude Code settings file. Honors CLAUDE_CONFIG_DIR; otherwise ~/.claude on
 // every OS (Claude Code uses the same user-scope location cross-platform).
