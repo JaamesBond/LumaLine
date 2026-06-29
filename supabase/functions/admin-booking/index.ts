@@ -137,20 +137,22 @@ Deno.serve(async (req) => {
     // Activate campaign if draft or paused. Advertiser is already active (new advertisers
     // default to 'active'; suspending/activating an advertiser is a separate ops action).
     if (camp.status === "draft" || camp.status === "paused") {
-      await svc("PATCH", "campaigns", {
+      const campUpd = await svc("PATCH", "campaigns", {
         body: { status: "active" },
         query: `id=eq.${li.campaign_id}`,
         prefer: "return=minimal",
       });
+      if (!campUpd.ok) return jsonErr("Failed to activate campaign", campUpd.status, campUpd.data);
     }
 
     // Activate line_item if draft or paused.
     if (li.status === "draft" || li.status === "paused") {
-      await svc("PATCH", "line_items", {
+      const liUpd = await svc("PATCH", "line_items", {
         body: { status: "active" },
         query: `id=eq.${creative.line_item_id}`,
         prefer: "return=minimal",
       });
+      if (!liUpd.ok) return jsonErr("Failed to activate line_item", liUpd.status, liUpd.data);
     }
 
     // Activate the creative (always — this is the point of the call).
