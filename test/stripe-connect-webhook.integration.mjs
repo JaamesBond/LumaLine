@@ -93,6 +93,7 @@ function teardown() {
     } catch { /* best-effort */ }
   }
   try { psql(`delete from public.stripe_webhook_events where type like 'account.%' or type like 'transfer.%';`); } catch { /* ignore */ }
+  try { psql(`delete from public.payouts where stripe_transfer_id like 'tr_unknown_%';`); } catch { /* ignore */ }
 }
 if (!SKIP) process.on('exit', teardown);
 
@@ -138,8 +139,9 @@ test('W4: transfer.reversed unwinds a paid payout (failed + ledger net zero)', {
   const acct = `acct_test_${randomUUID().slice(0, 8)}`;
   const pubId = newPublisher({ acct, country: 'US', payout_status: 'verified' });
   const transferId = `tr_test_${randomUUID().slice(0, 8)}`;
-  const payoutId = newPaidPayout(pubId, transferId, 30_000_000);
-  const payload = evt('transfer.reversed', { id: transferId, object: 'transfer', amount: 3_000_00, currency: 'usd', metadata: { source: 'lumaline', payout_id: payoutId } });
+  const payoutId = newPaidPayout(pubId, transferId, 30_000_000); // $30 = 3000 cents
+  // Full reversal: Stripe carries cumulative amount_reversed === amount.
+  const payload = evt('transfer.reversed', { id: transferId, object: 'transfer', amount: 3000, amount_reversed: 3000, currency: 'usd', metadata: { source: 'lumaline', payout_id: payoutId } });
   const res = await postWebhook(payload, stripeSig(payload));
   assert.equal(res.status, 200, `expected 200: ${JSON.stringify(res.data)}`);
   const status = psql(`select status||'|'||coalesce(failure_reason,'NULL') from public.payouts where id='${payoutId}';`);
@@ -152,6 +154,17 @@ test('W5: missing Stripe-Signature header is rejected (400)', { skip: SKIP }, as
   const payload = evt('account.updated', { id: 'acct_test_nohdr', object: 'account', charges_enabled: true, payouts_enabled: true, details_submitted: true, country: 'US' });
   const res = await postWebhook(payload, null);
   assert.equal(res.status, 400, `missing signature must be rejected: ${JSON.stringify(res.data)}`);
+});
+
+test('W7: transfer.reversed for an unknown transfer is a recorded 2xx ack (not a retryable error)', { skip: SKIP }, async () => {
+  // Review finding D discriminator: a legitimate business no-op (no matching payout) must
+  // return 200 AND record the dedup row, so Stripe does not retry it forever.
+  const payload = evt('transfer.reversed', { id: `tr_unknown_${randomUUID().slice(0, 8)}`, object: 'transfer', amount: 1000, amount_reversed: 1000, currency: 'usd', metadata: { source: 'lumaline' } });
+  const eventId = JSON.parse(payload).id;
+  const res = await postWebhook(payload, stripeSig(payload));
+  assert.equal(res.status, 200, `unknown-transfer ack must be 200: ${JSON.stringify(res.data)}`);
+  const n = psql(`select count(*) from public.stripe_webhook_events where event_id='${eventId}';`);
+  assert.equal(n, '1', 'a successful 2xx ack must record the dedup row');
 });
 
 test('W6: account.updated from an unsupported country -> ineligible_country', { skip: SKIP }, async () => {

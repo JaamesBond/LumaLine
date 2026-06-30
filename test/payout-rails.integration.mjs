@@ -90,6 +90,28 @@ function addEarning(pubId, ageDays) {
     ('${grp}','cpva_accrual','platform_revenue',${-PLAT},'cleared','impression','${impId}',null);`);
   return { impId, grp };
 }
+/** Add a cleared earning of an arbitrary `pubMicros` (non-cent-aligned ok), past hold. */
+function addEarningMicros(pubId, pubMicros, ageDays = 10) {
+  const impId = randomUUID(), winId = randomUUID(), grp = randomUUID();
+  const gross = Math.round(pubMicros / 0.6); // doesn't have to balance the 60/40 exactly; we book explicit legs
+  const plat = gross - pubMicros;
+  psql(`insert into public.impressions (id, window_id, publisher_id, attention_seconds, gross_micros, state, created_at)
+    values ('${impId}','${winId}','${pubId}',5,${gross},'cleared', now() - interval '${ageDays} days');`);
+  psql(`insert into public.ledger_entries (entry_group_id,event_type,account,amount_micros,state,source_type,source_id,publisher_id) values
+    ('${grp}','cpva_accrual','advertiser_billing',${gross},'cleared','impression','${impId}',null),
+    ('${grp}','cpva_accrual','publisher_earnings',${-pubMicros},'cleared','impression','${impId}','${pubId}'),
+    ('${grp}','cpva_accrual','platform_revenue',${-plat},'cleared','impression','${impId}',null);`);
+  return { impId, grp };
+}
+/** Add a cleared cpc_accrual publisher_earnings leg (triggers the M4 loud-guard). */
+function addCpcEarning(pubId) {
+  const clickId = randomUUID(), grp = randomUUID();
+  psql(`insert into public.ledger_entries (entry_group_id,event_type,account,amount_micros,state,source_type,source_id,publisher_id) values
+    ('${grp}','cpc_accrual','advertiser_billing',${GROSS},'cleared','click','${clickId}',null),
+    ('${grp}','cpc_accrual','publisher_earnings',${-PUB},'cleared','click','${clickId}','${pubId}'),
+    ('${grp}','cpc_accrual','platform_revenue',${-PLAT},'cleared','click','${clickId}',null);`);
+  return { clickId, grp };
+}
 const created = [];
 function makeFull(opts) { const p = newPublisher(opts); created.push(p); return p; }
 function teardown() {
@@ -249,6 +271,71 @@ test('P13: payable above the velocity cap is skipped (anomaly review)', { skip: 
   await rpc('payout_batch_reserve', { p_hold: HOLD, p_min_micros: MIN, p_velocity_max_micros: 10_000_000, p_limit: LIM });
   const n = psql(`select count(*) from public.payouts where publisher_id='${pubId}';`);
   assert.equal(n, '0', 'payout above velocity cap must not be reserved');
+});
+
+// --- Hardening from the adversarial money-path review --------------------------------
+
+test('P14: one publisher with cleared CPC earnings does NOT abort the whole batch', { skip: SKIP }, async () => {
+  // Finding B/9: the M4 CPC loud-guard RAISE must degrade to skipping that ONE publisher,
+  // not aborting reserve for everyone.
+  const cpcPub = makeFull();              // verified + has a cleared cpc_accrual leg -> guard fires
+  for (let i = 0; i < 50; i++) addEarning(cpcPub.pubId, 10);
+  addCpcEarning(cpcPub.pubId);
+  const okPub = makeFull();               // verified, CPVA-only, eligible
+  for (let i = 0; i < 50; i++) addEarning(okPub.pubId, 10);
+
+  const res = await rpc('payout_batch_reserve', { p_hold: HOLD, p_min_micros: MIN, p_velocity_max_micros: VEL, p_limit: LIM });
+  assert.ok(res.ok, `reserve must not abort: ${JSON.stringify(res.data)}`);
+
+  const nCpc = psql(`select count(*) from public.payouts where publisher_id='${cpcPub.pubId}';`);
+  const nOk  = psql(`select count(*) from public.payouts where publisher_id='${okPub.pubId}';`);
+  assert.equal(nCpc, '0', 'CPC-affected publisher must be skipped (not paid until M4)');
+  assert.equal(nOk, '1', 'the CPVA-only publisher must still be reserved (batch not aborted)');
+});
+
+test('P15: reserved amount is floored to whole cents; the sub-cent remainder stays payable', { skip: SKIP }, async () => {
+  // Finding C/10: book what we transfer. amount_micros must be a multiple of 10000.
+  const { pubId } = makeFull();
+  // One earning of 25_000_500 micros ($25.0005) -> floor to 25_000_000 ($25.00); 500 remains.
+  addEarningMicros(pubId, 25_000_500, 10);
+  await rpc('payout_batch_reserve', { p_hold: HOLD, p_min_micros: MIN, p_velocity_max_micros: VEL, p_limit: LIM });
+  const amt = psql(`select amount_micros from public.payouts where publisher_id='${pubId}';`);
+  assert.equal(amt, '25000000', 'amount must be floored to a whole-cent multiple of 10000');
+  assert.equal(Number(amt) % 10000, 0, 'amount_micros must be cent-aligned');
+
+  // Pay it; the 500-micro remainder must remain in payable (not lost as already_paid).
+  const payoutId = psql(`select id from public.payouts where publisher_id='${pubId}' and status='pending' limit 1;`);
+  await rpc('payout_confirm', { p_payout_id: payoutId, p_transfer_id: 'tr_floor_' + payoutId.slice(0, 8) });
+  const payable = psql(`select app.publisher_payable_micros('${pubId}'::uuid, interval '7 days');`);
+  assert.equal(payable, '500', 'sub-cent remainder must remain payable, not be lost');
+});
+
+test('P16: partial transfer.reversed books only the reversed amount (no over-credit)', { skip: SKIP }, async () => {
+  // Finding F: a partial reversal must restore only the reversed portion of payable.
+  const { pubId } = makeFull();
+  for (let i = 0; i < 50; i++) addEarning(pubId, 10);   // 30_000_000 payable
+  await rpc('payout_batch_reserve', { p_hold: HOLD, p_min_micros: MIN, p_velocity_max_micros: VEL, p_limit: LIM });
+  const payoutId = psql(`select id from public.payouts where publisher_id='${pubId}' and status='pending' limit 1;`);
+  await rpc('payout_confirm', { p_payout_id: payoutId, p_transfer_id: 'tr_partial_' + payoutId.slice(0, 8) });
+  // payable now 0 (full 30M paid). Reverse only 10M (cumulative).
+  const r = await rpc('payout_reverse', { p_payout_id: payoutId, p_reason: 'partial_reversal', p_reversed_micros: 10_000_000 });
+  assert.equal(r.data?.ok, true, `partial reverse failed: ${JSON.stringify(r.data)}`);
+
+  // payout stays 'paid' (not fully reversed); payable restored by exactly 10M.
+  const status = psql(`select status from public.payouts where id='${payoutId}';`);
+  assert.equal(status, 'paid', 'partial reversal must NOT mark the payout failed');
+  const payable = psql(`select app.publisher_payable_micros('${pubId}'::uuid, interval '7 days');`);
+  assert.equal(payable, '10000000', 'only the reversed 10M must become payable again');
+  const net = psql(`select coalesce(sum(amount_micros),0) from public.ledger_entries where source_type='payout' and source_id='${payoutId}' and account='publisher_earnings';`);
+  assert.equal(net, '20000000', 'publisher_earnings payout legs net to amount - reversed = 20M');
+  const grpNet = psql(`select coalesce(sum(amount_micros),0) from public.ledger_entries where source_type='payout' and source_id='${payoutId}';`);
+  assert.equal(grpNet, '0', 'all payout groups stay zero-sum balanced');
+
+  // A replay of the SAME cumulative reversal is a no-op (idempotent on amount_reversed).
+  const r2 = await rpc('payout_reverse', { p_payout_id: payoutId, p_reason: 'partial_reversal', p_reversed_micros: 10_000_000 });
+  assert.equal(r2.data?.ok, false, 'replayed cumulative reversal must be a no-op');
+  const payable2 = psql(`select app.publisher_payable_micros('${pubId}'::uuid, interval '7 days');`);
+  assert.equal(payable2, '10000000', 'replay must not restore more payable');
 });
 
 test('P11: money RPCs are service-role-only (anon/authenticated blocked)', { skip: SKIP }, async () => {
