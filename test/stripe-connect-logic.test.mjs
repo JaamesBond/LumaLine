@@ -17,6 +17,11 @@ test('a StripeInvalidRequestError is definitive (no transfer was created)', () =
   assert.equal(classifyTransferError({ type: 'StripeInvalidRequestError', code: 'parameter_invalid' }), 'definitive');
 });
 
+test('an invalid_request_error rawType (Deno SDK shape) is definitive — e.g. insufficient_capabilities', () => {
+  // The Deno esm.sh build surfaces err.rawType (snake) rather than the SDK class name.
+  assert.equal(classifyTransferError({ rawType: 'invalid_request_error', code: 'insufficient_capabilities_for_transfer' }), 'definitive');
+});
+
 test('a connection error is ambiguous (a transfer may exist -> never auto-fail)', () => {
   assert.equal(classifyTransferError({ type: 'StripeConnectionError' }), 'ambiguous');
 });

@@ -23,18 +23,20 @@
 export function classifyTransferError(err) {
   if (!err || typeof err !== "object") return "ambiguous";
   const e = /** @type {Record<string, unknown>} */ (err);
-  const type = String(e.type ?? "");
+  const type = String(e.type ?? "");          // SDK class, e.g. "StripeInvalidRequestError"
+  const rawType = String(e.rawType ?? "");    // API type, e.g. "invalid_request_error" (Deno build surfaces this)
   const code = String(e.code ?? "");
   // Idempotency replay / in-progress: the transfer may already exist or be landing.
   if (type === "StripeIdempotencyError" || code === "idempotency_error") return "ambiguous";
-  // Stripe rejected the request parameters before creating anything.
-  if (type === "StripeInvalidRequestError") return "definitive";
+  // A request-validation rejection (either error shape) means Stripe did NOT create a
+  // transfer — safe to fail. Covers e.g. insufficient_capabilities_for_transfer.
+  if (type === "StripeInvalidRequestError" || rawType === "invalid_request_error") return "definitive";
   // Anything else (network/5xx/429/409/unknown) -> assume a transfer might exist.
   return "ambiguous";
 }
 
 /**
- * Sum LumaLine transfers for reconciliation, NET of reversals, in micro-USD.
+ * Sum LumaLine transfers for reconciliation, NET of reversals, in micro-EUR.
  * A fully-reversed transfer contributes 0, matching the DB side (which excludes it).
  * @param {Array<{amount?: number, amount_reversed?: number, metadata?: {source?: string}}>} transfers
  * @returns {number}
@@ -44,7 +46,7 @@ export function sumLumalineTransfersMicros(transfers) {
   for (const t of transfers ?? []) {
     if (t && t.metadata && t.metadata.source === "lumaline") {
       const net = (Number(t.amount) || 0) - (Number(t.amount_reversed) || 0);
-      total += net * 10000; // 1 cent = 10,000 micro-USD
+      total += net * 10000; // 1 cent = 10,000 micro-EUR
     }
   }
   return total;

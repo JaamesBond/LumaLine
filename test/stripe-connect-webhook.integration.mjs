@@ -99,8 +99,8 @@ if (!SKIP) process.on('exit', teardown);
 
 test('W1: signed account.updated -> publisher payout_status verified', { skip: SKIP }, async () => {
   const acct = `acct_test_${randomUUID().slice(0, 8)}`;
-  const pubId = newPublisher({ acct, country: 'US', payout_status: 'pending' });
-  const payload = evt('account.updated', { id: acct, object: 'account', charges_enabled: true, payouts_enabled: true, details_submitted: true, country: 'US' });
+  const pubId = newPublisher({ acct, country: 'DE', payout_status: 'pending' }); // EEA -> supported
+  const payload = evt('account.updated', { id: acct, object: 'account', charges_enabled: true, payouts_enabled: true, details_submitted: true, country: 'DE' });
   const res = await postWebhook(payload, stripeSig(payload));
   assert.equal(res.status, 200, `expected 200: ${JSON.stringify(res.data)}`);
   assert.equal(res.data?.eligibility, 'verified');
@@ -139,9 +139,9 @@ test('W4: transfer.reversed unwinds a paid payout (failed + ledger net zero)', {
   const acct = `acct_test_${randomUUID().slice(0, 8)}`;
   const pubId = newPublisher({ acct, country: 'US', payout_status: 'verified' });
   const transferId = `tr_test_${randomUUID().slice(0, 8)}`;
-  const payoutId = newPaidPayout(pubId, transferId, 30_000_000); // $30 = 3000 cents
+  const payoutId = newPaidPayout(pubId, transferId, 30_000_000); // €30 = 3000 cents
   // Full reversal: Stripe carries cumulative amount_reversed === amount.
-  const payload = evt('transfer.reversed', { id: transferId, object: 'transfer', amount: 3000, amount_reversed: 3000, currency: 'usd', metadata: { source: 'lumaline', payout_id: payoutId } });
+  const payload = evt('transfer.reversed', { id: transferId, object: 'transfer', amount: 3000, amount_reversed: 3000, currency: 'eur', metadata: { source: 'lumaline', payout_id: payoutId } });
   const res = await postWebhook(payload, stripeSig(payload));
   assert.equal(res.status, 200, `expected 200: ${JSON.stringify(res.data)}`);
   const status = psql(`select status||'|'||coalesce(failure_reason,'NULL') from public.payouts where id='${payoutId}';`);
@@ -169,8 +169,9 @@ test('W7: transfer.reversed for an unknown transfer is a recorded 2xx ack (not a
 
 test('W6: account.updated from an unsupported country -> ineligible_country', { skip: SKIP }, async () => {
   const acct = `acct_test_${randomUUID().slice(0, 8)}`;
-  const pubId = newPublisher({ acct, country: 'US', payout_status: 'pending' });
-  const payload = evt('account.updated', { id: acct, object: 'account', charges_enabled: true, payouts_enabled: true, details_submitted: true, country: 'FR' });
+  const pubId = newPublisher({ acct, country: 'DE', payout_status: 'pending' });
+  // JP is outside the EEA -> unsupported for a RO/EUR platform.
+  const payload = evt('account.updated', { id: acct, object: 'account', charges_enabled: true, payouts_enabled: true, details_submitted: true, country: 'JP' });
   const res = await postWebhook(payload, stripeSig(payload));
   assert.equal(res.status, 200, `expected 200: ${JSON.stringify(res.data)}`);
   assert.equal(res.data?.eligibility, 'ineligible_country');

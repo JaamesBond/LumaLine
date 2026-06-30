@@ -52,9 +52,21 @@ function jsonErr(message: string, status: number, detail?: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, "content-type": "application/json" } });
 }
 
-// Countries LumaLine pays out to (Stripe Connect cross-border + our tax posture). Keep in
-// sync with publisher-tos §7.7. account.updated from any other country → ineligible_country.
-const SUPPORTED_COUNTRIES = new Set(["US", "CA", "GB", "AU", "IE", "NZ"]);
+// Payout currency. The platform (Aivora SRL) is a Romania/EUR Stripe entity, so LumaLine
+// operates in EUR end-to-end (ledger micros = EUR-micros, advertisers charged in EUR,
+// publishers paid in EUR) — no FX on the home leg. 1 EUR = 1,000,000 micros = 100 cents.
+const PAYOUT_CURRENCY = "eur";
+
+// Countries LumaLine pays out to: the EEA (SEPA reach for a RO/EUR platform). A RO platform
+// cannot pay e.g. US recipients via Connect, so the set is EU/EEA. Keep in sync with
+// publisher-tos §7. account.updated from any other country → ineligible_country.
+const SUPPORTED_COUNTRIES = new Set([
+  // EU-27
+  "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IE",
+  "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE",
+  // EEA (non-EU)
+  "IS", "LI", "NO",
+]);
 
 // Public app URL for hosted-onboarding return/refresh redirects.
 const APP_URL = Deno.env.get("LUMALINE_APP_URL") ?? "http://localhost:3000";
@@ -108,7 +120,7 @@ async function callerPublisher(
   };
 }
 
-// micro-USD → Stripe cents (1 cent = 10,000 micros).
+// micro-EUR → Stripe cents (1 cent = 10,000 micros).
 function microsToCents(micros: number): number { return Math.round(micros / 10000); }
 function payoutIdemKey(payoutId: string): string { return `lumaline_payout_${payoutId}`; }
 
@@ -332,7 +344,7 @@ Deno.serve(async (req) => {
           const transfer = await stripe.transfers.create(
             {
               amount: cents,
-              currency: "usd",
+              currency: PAYOUT_CURRENCY,
               destination: acct,
               metadata: { source: "lumaline", payout_id: po.id, publisher_id: po.publisher_id },
             },
