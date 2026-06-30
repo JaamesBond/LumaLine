@@ -35,6 +35,11 @@ import {
   SERVICE_ROLE_KEY,
 } from "../_shared/jwt.ts";
 import Stripe from "https://esm.sh/stripe@14.21.0?target=deno";
+import {
+  classifyTransferError,
+  sumLumalineTransfersMicros,
+  reversedMicrosFromTransfer,
+} from "../_shared/payout-logic.mjs";
 
 const cors = { ...corsHeaders, "Access-Control-Allow-Methods": "GET, POST, OPTIONS" } as const;
 
@@ -148,43 +153,63 @@ Deno.serve(async (req) => {
       return jsonErr(`Signature verification failed: ${(err as { message?: string }).message ?? "bad signature"}`, 400);
     }
 
-    // Replay/dedup guard: record the event id; a duplicate is a no-op (idempotent 200).
-    const dedup = await svc("POST", "stripe_webhook_events", {
-      body: { event_id: event.id, type: event.type },
-      query: "on_conflict=event_id",
-      prefer: "return=representation,resolution=ignore-duplicates",
+    // Dedup ordering (review finding D): CHECK first, but only RECORD after the handler
+    // succeeds. Recording before handling meant a handler/infra failure left a dedup row
+    // that turned Stripe's retry into a permanent no-op (lost event). Both handlers are
+    // idempotent, so a replay arriving before the record is harmless.
+    const seen = await svc("GET", "stripe_webhook_events", {
+      query: `event_id=eq.${encodeURIComponent(event.id)}&select=event_id&limit=1`,
     });
-    const inserted = Array.isArray(dedup.data) && (dedup.data as unknown[]).length > 0;
-    if (!inserted) return jsonOk({ ok: true, duplicate: true, type: event.type });
+    if (seen.ok && Array.isArray(seen.data) && (seen.data as unknown[]).length > 0) {
+      return jsonOk({ ok: true, duplicate: true, type: event.type });
+    }
 
+    // Handle (idempotent). ANY infra failure -> 5xx with NO dedup row, so Stripe retries.
+    // A 2xx-with-{ok:false} business outcome (e.g. payout not_paid) is NOT an error.
+    let handled: Record<string, unknown>;
     try {
       if (event.type === "account.updated") {
         const account = event.data.object as Stripe.Account;
         const status = eligibilityFor(account);
-        await serviceRpc("set_publisher_payout_eligibility", {
+        const r = await serviceRpc("set_publisher_payout_eligibility", {
           p_stripe_account_id: account.id,
           p_status: status,
         });
-        return jsonOk({ ok: true, type: event.type, eligibility: status });
-      }
-
-      if (event.type === "transfer.reversed") {
+        if (!r.ok) return jsonErr("eligibility update failed", 502, r.data);
+        handled = { type: event.type, eligibility: status };
+      } else if (event.type === "transfer.reversed") {
         const transfer = event.data.object as Stripe.Transfer;
-        // Map transfer → payout (we store transfer.id on the payout at confirm).
         const poRes = await svc("GET", "payouts", {
-          query: `stripe_transfer_id=eq.${transfer.id}&select=id&limit=1`,
+          query: `stripe_transfer_id=eq.${encodeURIComponent(transfer.id)}&select=id&limit=1`,
         });
+        if (!poRes.ok) return jsonErr("payout lookup failed", 502, poRes.data);
         const rows = (poRes.data as Array<{ id: string }>) ?? [];
-        if (rows.length === 0) return jsonOk({ ok: true, type: event.type, note: "no matching payout" });
-        const r = await serviceRpc("payout_reverse", { p_payout_id: rows[0].id, p_reason: "transfer_reversed" });
-        return jsonOk({ ok: true, type: event.type, reverse: r.data });
+        if (rows.length === 0) {
+          handled = { type: event.type, note: "no matching payout" };
+        } else {
+          const r = await serviceRpc("payout_reverse", {
+            p_payout_id: rows[0].id,
+            p_reason: "transfer_reversed",
+            p_reversed_micros: reversedMicrosFromTransfer(transfer),
+          });
+          if (!r.ok) return jsonErr("payout reverse failed", 502, r.data);
+          handled = { type: event.type, reverse: r.data };
+        }
+      } else {
+        handled = { type: event.type, handled: false };
       }
-
-      // Acknowledge other event types (we subscribed narrowly, but stay tolerant).
-      return jsonOk({ ok: true, type: event.type, handled: false });
     } catch (err: unknown) {
+      // Infra exception -> 5xx, no dedup row -> Stripe retries.
       return jsonErr(`Webhook handler error: ${(err as { message?: string }).message ?? "unknown"}`, 500);
     }
+
+    // Record the dedup row AFTER success (ignore-duplicates handles the concurrent-replay race).
+    await svc("POST", "stripe_webhook_events", {
+      body: { event_id: event.id, type: event.type },
+      query: "on_conflict=event_id",
+      prefer: "return=minimal,resolution=ignore-duplicates",
+    });
+    return jsonOk({ ok: true, ...handled });
   }
 
   // ---- POST /connect/onboard (auth publisher) -----------------------------------------
@@ -270,26 +295,40 @@ Deno.serve(async (req) => {
     let stripe: Stripe;
     try { stripe = getStripe(); } catch (err) { return jsonErr((err as { message?: string }).message ?? "Stripe not configured", 503); }
 
+    // Find any existing transfer carrying metadata.payout_id === po.id (recovers a crash
+    // between transfer and confirm, an idempotency-key-expired resume, or a replay).
+    const findExistingTransfer = async (acct: string, payoutId: string): Promise<string | null> => {
+      const existing = await stripe.transfers.list({ destination: acct, limit: 100 });
+      for (const t of existing.data) if (t.metadata?.payout_id === payoutId) return t.id;
+      return null;
+    };
+
     const results: Record<string, unknown>[] = [];
     for (const po of pending) {
       // Resolve the publisher's connected account (destination).
       const acctRes = await svc("GET", "publishers", { query: `id=eq.${po.publisher_id}&select=stripe_account_id&limit=1` });
       const acct = ((acctRes.data as Array<{ stripe_account_id: string | null }>) ?? [])[0]?.stripe_account_id ?? null;
       if (!acct) {
+        // No transfer was attempted -> safe to fail.
         await serviceRpc("payout_fail", { p_payout_id: po.id, p_reason: "no_connected_account" });
         results.push({ payout_id: po.id, status: "failed", reason: "no_connected_account" });
         continue;
       }
+      // amount_micros is cent-aligned (reserve floors it), so this is exact.
       const cents = microsToCents(po.amount_micros);
+
+      // --- Phase A: obtain a transfer id (pre-check, then create only if absent) ---------
+      let transferId: string | null = null;
       try {
-        // TRAP #3: pre-check for an existing transfer by metadata.payout_id (the Stripe
-        // idempotency key expires after 24h; this guard survives a >24h crash-resume).
-        let transferId: string | null = null;
-        const existing = await stripe.transfers.list({ destination: acct, limit: 100 });
-        for (const t of existing.data) {
-          if (t.metadata?.payout_id === po.id) { transferId = t.id; break; }
-        }
-        if (!transferId) {
+        transferId = await findExistingTransfer(acct, po.id);
+      } catch {
+        // Can't even list -> leave the payout 'pending'; the next run recovers it.
+        results.push({ payout_id: po.id, status: "deferred", reason: "pre_check_failed" });
+        continue;
+      }
+
+      if (!transferId) {
+        try {
           const transfer = await stripe.transfers.create(
             {
               amount: cents,
@@ -300,18 +339,50 @@ Deno.serve(async (req) => {
             { idempotencyKey: payoutIdemKey(po.id) },
           );
           transferId = transfer.id;
+        } catch (err: unknown) {
+          // CRITICAL (review finding A): NEVER payout_fail when a transfer might exist —
+          // doing so orphans the transfer and double-pays on the next run. Only fail on a
+          // DEFINITIVE no-transfer error, and even then re-check first.
+          if (classifyTransferError(err) === "definitive") {
+            let recheck: string | null = null;
+            try { recheck = await findExistingTransfer(acct, po.id); } catch { recheck = null; }
+            if (recheck) {
+              transferId = recheck; // it WAS created despite the error -> confirm it below.
+            } else {
+              const msg = (err as { message?: string }).message ?? "transfer_rejected";
+              await serviceRpc("payout_fail", { p_payout_id: po.id, p_reason: msg.slice(0, 200) });
+              results.push({ payout_id: po.id, status: "failed", reason: msg });
+              continue;
+            }
+          } else {
+            // Ambiguous (timeout / connection reset / 5xx / 409 idempotency / unknown):
+            // leave 'pending'; the next run's pre-check self-heals (re-finds or recreates
+            // idempotently under the same key). No double-pay, no money lost.
+            results.push({ payout_id: po.id, status: "deferred", reason: "ambiguous_transfer_error" });
+            continue;
+          }
         }
+      }
+
+      // --- Phase B: confirm (book the ledger + mark paid). On failure, leave 'pending' ----
+      // The transfer is recorded at Stripe with metadata.payout_id, so the next run re-finds
+      // and confirms it. NEVER payout_fail here (the money has moved).
+      try {
         const conf = await serviceRpc("payout_confirm", { p_payout_id: po.id, p_transfer_id: transferId });
+        if (!conf.ok) {
+          results.push({ payout_id: po.id, status: "deferred", reason: "confirm_infra_error", transfer_id: transferId });
+          continue;
+        }
         results.push({ payout_id: po.id, status: "paid", transfer_id: transferId, confirm: conf.data });
-      } catch (err: unknown) {
-        const msg = (err as { message?: string }).message ?? "transfer_failed";
-        await serviceRpc("payout_fail", { p_payout_id: po.id, p_reason: msg.slice(0, 200) });
-        results.push({ payout_id: po.id, status: "failed", reason: msg });
+      } catch {
+        results.push({ payout_id: po.id, status: "deferred", reason: "confirm_threw", transfer_id: transferId });
       }
     }
 
     const paid = results.filter((r) => r.status === "paid").length;
-    return jsonOk({ ok: true, dry_run: false, reserved: reserve.data, paid, processed: results.length, results });
+    const deferred = results.filter((r) => r.status === "deferred").length;
+    const failed = results.filter((r) => r.status === "failed").length;
+    return jsonOk({ ok: true, dry_run: false, reserved: reserve.data, paid, deferred, failed, processed: results.length, results });
   }
 
   // ---- GET /reconcile?from&to (admin) -------------------------------------------------
@@ -340,12 +411,10 @@ Deno.serve(async (req) => {
         const params: Stripe.TransferListParams = { created: { gte: fromUnix, lte: toUnix }, limit: 100 };
         if (startingAfter) params.starting_after = startingAfter;
         const page = await stripe.transfers.list(params);
-        for (const t of page.data) {
-          if (t.metadata?.source === "lumaline") {
-            stripeTotalMicros += t.amount * 10000; // cents → micros
-            stripeCount++;
-          }
-        }
+        // NET of reversals (review finding E): a fully-reversed transfer contributes 0,
+        // matching the DB side (payout_recon_totals counts only status='paid').
+        stripeTotalMicros += sumLumalineTransfersMicros(page.data as unknown as Array<{ amount?: number; amount_reversed?: number; metadata?: { source?: string } }>);
+        for (const t of page.data) if (t.metadata?.source === "lumaline") stripeCount++;
         hasMore = page.has_more;
         if (hasMore && page.data.length > 0) startingAfter = page.data[page.data.length - 1].id;
         else hasMore = false;
