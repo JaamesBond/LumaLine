@@ -246,9 +246,15 @@ Legal ✅ done (v1.0 in force). Remaining: enable **Resend** as the Supabase Aut
 
 ## 5b. M3 as-built deltas (publisher payout rails — code complete, owner-gated for live)
 
-Branch `feat/m3-payout-rails`. Built + verified against a local Supabase stack (real Deno edge
+Branch `feat/m3-payout-rails` (PR #7). Built + verified against a local Supabase stack (real Deno edge
 runtime + Postgres); `supabase db reset` applies every migration in-sequence with zero drift.
-`node --test` **224 pass / 7 skip / 0 fail**.
+`node --test` **225 pass / 7 skip / 0 fail**.
+
+**Currency: EUR.** The live e2e found the product was coded in USD while the platform Stripe account
+(Aivora SRL) is **RO / EUR / RON, with no USD balance** — so US onboarding/transfers errored. Resolved
+(owner decision) by operating in **EUR** end-to-end: payout + billing currency `eur`,
+`SUPPORTED_COUNTRIES` = the **EEA** (EU-27 + IS/LI/NO), client/legal/docs in € (€25 min). The micros
+model is currency-agnostic (1 EUR = 1,000,000 micros = 100 cents), so no ledger math changed.
 
 **New edge function `stripe-connect`** (`verify_jwt=false`, per-route auth):
 - `POST /connect/onboard`, `GET /connect/status` — Express account get-or-create + **Stripe-hosted**
@@ -288,11 +294,30 @@ earnings are only ever paid after they can no longer be clawed back.
 fixed** (1 critical double-pay, 2 high, 3 medium — see `MILESTONE_STATUS.md`). This is NOT a substitute
 for the **external** money-path security review (M3-T7, owner-gated, hard gate for M5).
 
+**Real-Stripe (test) e2e (2026-06-30)** — local stack + real Stripe test API + `stripe listen`:
+- ✅ T1 onboarding: real Express account + hosted onboarding link created (EUR/EEA).
+- ✅ T1 webhook: a real Stripe-signed `account.updated` delivered over live HTTP → signature verified → 200.
+- ✅ T2 transfer call: real `transfers.create`, EUR accepted; **both double-pay-safe branches exercised
+  against live Stripe errors** — ambiguous → payout left `pending` (no ledger); definitive capability
+  error → `payout_fail` (no ledger, payable restored). Reservation lock + per-publisher CPC skip +
+  cent-floored reserve confirmed live. (Found + fixed a classifier gap: the Deno esm.sh Stripe build
+  surfaces `err.rawType` (snake-case), so `classifyTransferError` now treats `invalid_request_error` as
+  definitive too.)
+- ⏳ NOT proven (owner step): a fully-COMPLETED money-landing transfer + recon — the destination needs the
+  `transfers` capability **active**, which needs the Connect **platform profile** configured (Custom
+  accounts) OR one **browser** Express onboarding.
+
+**⚠️ Remote state:** the project `prmsonskzrubqsazmpwd` is at **M1** — M2 was merged to `main` but **never
+deployed** there (no `disputes`/`advertiser_charges`/`billing`/`admin-booking`), and M1's `device_code_flow`
+is re-stamped `20260629114856` (drift). So the remote deploy must reconcile the drift and ship **M2 then M3**.
+
 ### Owner gate to take M3 LIVE
-Confirm Connect (Express) is on in test mode; authorize the production deploy of `stripe-connect` +
-migrations `20260629100000`/`20260629110000`; provide/lets-cc-create the `STRIPE_WEBHOOK_SECRET`; then
-live test-mode verify (onboarding + a real transfer + recon). T6 monitoring, T7 external review, and T8
-publisher dashboard remain owner-supplied.
+Authorize the production deploy of **M2 (migns `020000..070000` + `billing` + `admin-booking`) then M3**
+(`stripe-connect` + migns `080000..110000`) to `prmsonskzrubqsazmpwd`, reconciling the M1 drift; cc creates
+the Connect webhook endpoint via the Stripe API → `STRIPE_WEBHOOK_SECRET` in Vault; configure the Connect
+platform profile (or do one browser Express onboarding) for the completed-transfer verify; then live
+test-mode verify (onboarding + a real completed EUR transfer + recon). Sign `publisher-tos.md §7` (EUR).
+T6 monitoring, T7 external review, T8 publisher dashboard remain owner-supplied.
 
 ---
 
