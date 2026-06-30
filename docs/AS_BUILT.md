@@ -244,6 +244,58 @@ Legal ✅ done (v1.0 in force). Remaining: enable **Resend** as the Supabase Aut
 
 ---
 
+## 5b. M3 as-built deltas (publisher payout rails — code complete, owner-gated for live)
+
+Branch `feat/m3-payout-rails`. Built + verified against a local Supabase stack (real Deno edge
+runtime + Postgres); `supabase db reset` applies every migration in-sequence with zero drift.
+`node --test` **224 pass / 7 skip / 0 fail**.
+
+**New edge function `stripe-connect`** (`verify_jwt=false`, per-route auth):
+- `POST /connect/onboard`, `GET /connect/status` — Express account get-or-create + **Stripe-hosted**
+  onboarding link; `/status` reports eligibility. Caller resolved to their OWN publisher via RLS.
+- `POST /webhook` — the only unauthenticated route; authenticated by the **Stripe signature**
+  (`constructEventAsync` over the RAW body). Dedups on `event.id` (**check-first/record-after-success**,
+  5xx on infra failure so Stripe retries), handles `account.updated` (eligibility + country gating) and
+  `transfer.reversed` (amount-aware reversal).
+- `POST /payout/batch[?dry_run]` — admin: `payout_batch_reserve` → transfer **every** db-pending payout
+  (crash-recovery, not just this run) → `payout_confirm`. Idempotency key `lumaline_payout_<id>` + a
+  `metadata.payout_id` pre-check (survives Stripe's 24h key expiry). **Never `payout_fail` once a transfer
+  may exist** (the critical double-pay fix) — ambiguous errors leave the payout `pending` to self-heal.
+- `GET /reconcile?from&to` — admin: DB paid-payout debits vs Stripe transfers **net of reversals**.
+- Pure money-decision helpers in `_shared/payout-logic.mjs` (`.mjs` so `node --test` imports them):
+  `classifyTransferError`, `sumLumalineTransfersMicros`, `reversedMicrosFromTransfer`.
+
+**New migrations:**
+- `20260629080000_resolve_dispute.sql` — admin dispute resolution (M2 carry-forward).
+- `20260629090000_gdpr_deletion.sql` — `gdpr_delete_publisher()`: anonymize-in-place, ledger preserved +
+  still zero-sum, refuses while a payout is in flight.
+- `20260629100000_payout_rails.sql` — `payout_batch_reserve` (one-active-per-publisher unique index =
+  reservation lock; **ledger booked at confirm, not reserve**), `payout_confirm`/`payout_fail`/
+  `payout_reverse`, `app.publisher_payable_micros` (matured CPVA − already-paid, **loud CPC guard** until
+  M4), `payout_recon_totals`, `set_publisher_payout_eligibility`, `stripe_webhook_events` dedup table.
+  All money RPCs `service_role`-only.
+- `20260629110000_payout_rails_hardening.sql` — adversarial-review fixes: per-row CPC-guard isolation
+  (one publisher can't freeze the batch), **floor payable to whole cents** (carry the remainder), and
+  **amount-aware `payout_reverse`** (cumulative reversed, idempotent; partial keeps `paid`).
+
+**Ledger convention (payout):** `publisher_earnings` **+amount** / `platform_cash` **−amount** at confirm
+(reduces what is owed); the mirror at reverse. `payable = matured cpva earnings − already-paid`.
+
+**Money-safety:** the 7-day payout hold is strictly greater than the 72h clawback window, so cleared
+earnings are only ever paid after they can no longer be clawed back.
+
+**Internal adversarial review (2026-06-30):** 6 dimensions × 3-lens refutation; **11 confirmed, all
+fixed** (1 critical double-pay, 2 high, 3 medium — see `MILESTONE_STATUS.md`). This is NOT a substitute
+for the **external** money-path security review (M3-T7, owner-gated, hard gate for M5).
+
+### Owner gate to take M3 LIVE
+Confirm Connect (Express) is on in test mode; authorize the production deploy of `stripe-connect` +
+migrations `20260629100000`/`20260629110000`; provide/lets-cc-create the `STRIPE_WEBHOOK_SECRET`; then
+live test-mode verify (onboarding + a real transfer + recon). T6 monitoring, T7 external review, and T8
+publisher dashboard remain owner-supplied.
+
+---
+
 ## 6. Deferral ledger
 
 Genuine deferrals, recorded so none is silently lost. Each names the **reason** and the **milestone/owner**
