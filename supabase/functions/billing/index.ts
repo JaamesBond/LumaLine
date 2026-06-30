@@ -119,8 +119,8 @@ function getStripe(): Stripe {
   return _stripe;
 }
 
-// Convert micro-USD to Stripe cents.
-// 1 USD = 1,000,000 micro-USD = 100 cents → 1 cent = 10,000 micro-USD.
+// Convert micro-EUR to Stripe cents (LumaLine operates in EUR — RO/EUR Stripe entity).
+// 1 EUR = 1,000,000 micro-EUR = 100 cents → 1 cent = 10,000 micro-EUR.
 export function microsToCents(micros: number): number {
   return Math.round(micros / 10000);
 }
@@ -241,7 +241,7 @@ Deno.serve(async (req) => {
         continue;
       }
 
-      // Below Stripe minimum ($0.50 = 50 cents = 500,000 micro-USD).
+      // Below Stripe minimum (€0.50 = 50 cents = 500,000 micro-EUR).
       if (amountCents < 50) {
         const record = {
           entry_group_id: entry.entry_group_id,
@@ -305,7 +305,7 @@ Deno.serve(async (req) => {
         const intent = await stripe.paymentIntents.create(
           {
             amount:         amountCents,
-            currency:       "usd",
+            currency:       "eur",
             customer:       customerId,
             payment_method: "pm_card_visa",  // test mode only
             confirm:        true,
@@ -387,9 +387,22 @@ Deno.serve(async (req) => {
       }
     }
 
+    // Split the previously-conflated total into an honest per-outcome breakdown.
+    // `charged` now means "actual successful charges" (was: results.length, which
+    // also counted skipped + failed + dry-run rows). Old clients reading a numeric
+    // `charged` still work; new clients should read `counts`.
+    const counts = {
+      succeeded:    results.filter((r) => r.status === "succeeded").length,
+      skipped:      results.filter((r) => r.status === "skipped").length,
+      failed:       results.filter((r) => r.status === "failed").length,
+      would_charge: results.filter((r) => r.would_charge === true).length,
+    };
+
     return jsonOk({
-      charged:  results.length,
-      dry_run:  dryRun,
+      charged:   counts.succeeded,
+      processed: results.length,
+      counts,
+      dry_run:   dryRun,
       results,
     });
   }

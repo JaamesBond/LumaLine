@@ -33,7 +33,7 @@ this document must be updated and the billing tests re-run.
 | **T+72h — clawback-immune point** | impression.created\_at + 72h | eligible for clearing | `clear_events()` (hourly cron) promotes unflagged provisional impressions to `state='cleared'` and books a balanced 3-leg ledger group (advertiser\_billing / publisher\_earnings / platform\_revenue, 60/40 split). |
 | **T+72h+ — billing run** | next `/billing/charge` call | `advertiser_charges.status = 'succeeded'` | `/billing/charge` (admin-triggered) reads `uncharged_advertiser_billings`, issues a Stripe PaymentIntent per cleared group, and records the result in `advertiser_charges`. On success, `impressions.stripe_charge_id` is stamped with the `pi_*` id. |
 | **Clawback after charge** | any time post-billing | `clawback_reviews.refund_queued = true` | If `approve_clawback()` runs after a Stripe charge has already been issued, the admin calls `/billing/refund` with the approved review\_id. LumaLine calls `stripe.refunds.create({ payment_intent: pi_id, amount: cents, reason: 'fraudulent' })` and marks `refund_queued=true`. |
-| **T+72h + hold — publisher payout** | M3-T2 | TBD | Publisher's 60% share becomes eligible for payout only after the hold period (strictly greater than the clawback window; exact value defined in M3-T2). |
+| **T+7 days — publisher payout** | impression.created\_at + 7 days | eligible for payout | Publisher's 60% share becomes eligible for payout only after the **7-day hold** (strictly greater than the 72h clawback window). The payout batch (`payout_batch_reserve()` + `stripe-connect` transfer) reserves a balanced ledger group (`publisher_earnings` positive / `platform_cash` negative) and creates a Stripe Connect transfer with an idempotency key derived from `payout_id`. |
 
 ---
 
@@ -44,8 +44,10 @@ this document must be updated and the billing tests re-run.
    cleared entries. A provisional impression can never be charged.
 
 2. **Publisher payout hold > clawback window — NEVER during the clawback window.**
-   Payout eligibility (M3-T2) is set strictly after the 72h immune point. Publishers cannot
-   receive a payout for an impression that could still be clawed back.
+   Payout eligibility is set at **impression.created_at + 7 days**, strictly after the 72h
+   immune point. Publishers cannot receive a payout for an impression that could still be
+   clawed back. The payout batch only counts cleared `publisher_earnings` legs whose source
+   event is older than the 7-day hold.
 
 3. **Sentinel/house: never charged, never paid (structural).**
    `is_house=true` advertisers have `gross_micros=0` structurally (enforced by
@@ -74,8 +76,10 @@ this document must be updated and the billing tests re-run.
 | Constant | Value | Source |
 |----------|-------|--------|
 | Clawback-immune window | **72 hours** | `clear_events(p_older default interval '72 hours')` |
+| Publisher payout hold | **7 days** | `payout_batch_reserve(p_hold default interval '7 days')` (strictly > clawback window) |
+| Minimum payout | **€25.00** (25,000,000 micros) | `payouts.min_payout_micros default 25000000` |
 | IVT scan window | 6 minutes (lookback), 5 minutes (cadence) | `pg_cron` schedule in `20260627033345_clearing_and_ledger.sql` |
-| Billing minimum | 50 cents ($0.50) | `billing/index.ts`: `amountCents < 50 → skipped` |
+| Billing minimum | 50 cents (€0.50) | `billing/index.ts`: `amountCents < 50 → skipped` |
 | Publisher split | 60% | `app.accrue()`: `round(gross * 0.6)` |
 | Platform split | 40% | `gross − publisher_share` |
-| Micro-USD per cent | 10,000 | `microsToCents(micros) = round(micros / 10000)` |
+| Micro-EUR per cent | 10,000 | `microsToCents(micros) = round(micros / 10000)` |

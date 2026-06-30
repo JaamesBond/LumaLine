@@ -184,7 +184,7 @@ export async function logout({
 }
 
 // --- earnings (transparent read) ------------------------------------------------------
-const usd = (micros) => '$' + (Number(micros || 0) / 1_000_000).toFixed(2);
+const eur = (micros) => '€' + (Number(micros || 0) / 1_000_000).toFixed(2);
 
 export async function earnings({
   file = DEVICE_TOKEN, authBase = AUTH_BASE, fetchImpl = fetch, out = console.log,
@@ -198,13 +198,13 @@ export async function earnings({
   const { ok, status, data } = await postJson(fetchImpl, `${authBase}/earnings`, {}, { bearer: token, timeoutMs });
   if (!ok) { out(`Could not read earnings (HTTP ${status}${data?.error ? ': ' + data.error : ''}).`); return null; }
   const bal = data?.balance ?? {};
-  out('Earnings (transparent ledger — all amounts in USD):');
-  out(`  balance   : ${usd(bal.balance_micros)}   (earned ${usd(bal.earned_micros)}, paid ${usd(bal.paid_micros)}, reversed ${usd(bal.reversed_micros)})`);
+  out('Earnings (transparent ledger — all amounts in EUR):');
+  out(`  balance   : ${eur(bal.balance_micros)}   (earned ${eur(bal.earned_micros)}, paid ${eur(bal.paid_micros)}, reversed ${eur(bal.reversed_micros)})`);
   const windows = Array.isArray(data?.windows) ? data.windows : [];
   out(`  windows   : ${windows.length} cleared/booked impression-window(s) on record`);
   out('');
   out('  Note: earnings ACCRUE now but real payouts begin only at the production go-live.');
-  out('  Until then these balances are informational. Anonymous/revoked devices accrue $0.');
+  out('  Until then these balances are informational. Anonymous/revoked devices accrue €0.');
   return data;
 }
 
