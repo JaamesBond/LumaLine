@@ -430,6 +430,15 @@ verify_jwt = false
 [functions.billing]
 verify_jwt = false
 
+# stripe-connect — publisher payout rails (M3-T1/T2/T3). verify_jwt=false because this
+# function manages auth per-route itself: the /webhook route is UNAUTHENTICATED and
+# authenticated ONLY by the Stripe signature (Stripe sends no Supabase JWT), /connect/*
+# resolve the caller's own publisher via the forwarded bearer + RLS, and /payout/batch +
+# /reconcile gate on forwardRpc('admin_check'). Secrets in Supabase Vault:
+# STRIPE_SECRET_KEY=sk_test_*, STRIPE_WEBHOOK_SECRET=whsec_*.
+[functions.stripe-connect]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327

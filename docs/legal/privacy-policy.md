@@ -100,7 +100,7 @@ credential, not a data payload.
 ### 3.4 Earnings reads
 
 When your client (or the website) reads your earnings, the response contains only
-**monetary amounts in micro-USD** and **window metadata** (e.g. counts, states,
+**monetary amounts in micro-EUR** and **window metadata** (e.g. counts, states,
 timestamps). No content from your machine is involved.
 
 ---
@@ -141,7 +141,7 @@ Once you log in, we store:
 | Handle (chosen by you) | Display / account reference |
 | Country (optional, ISO 3166-1 alpha-2 code) | Payout eligibility / tax region |
 | Device records — id, optional label, client version, created/revoked timestamps | Manage and revoke devices |
-| Earnings ledger entries (micro-USD) | Track accrued earnings and payouts |
+| Earnings ledger entries (micro-EUR) | Track accrued earnings and payouts |
 | Payout account reference (e.g. Stripe account id), once you set up payouts | Pay you |
 
 Each publisher's data is isolated from every other publisher's data by
