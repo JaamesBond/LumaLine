@@ -77,9 +77,9 @@ this document must be updated and the billing tests re-run.
 |----------|-------|--------|
 | Clawback-immune window | **72 hours** | `clear_events(p_older default interval '72 hours')` |
 | Publisher payout hold | **7 days** | `payout_batch_reserve(p_hold default interval '7 days')` (strictly > clawback window) |
-| Minimum payout | **$25.00** (25,000,000 micros) | `payouts.min_payout_micros default 25000000` |
+| Minimum payout | **€25.00** (25,000,000 micros) | `payouts.min_payout_micros default 25000000` |
 | IVT scan window | 6 minutes (lookback), 5 minutes (cadence) | `pg_cron` schedule in `20260627033345_clearing_and_ledger.sql` |
-| Billing minimum | 50 cents ($0.50) | `billing/index.ts`: `amountCents < 50 → skipped` |
+| Billing minimum | 50 cents (€0.50) | `billing/index.ts`: `amountCents < 50 → skipped` |
 | Publisher split | 60% | `app.accrue()`: `round(gross * 0.6)` |
 | Platform split | 40% | `gross − publisher_share` |
-| Micro-USD per cent | 10,000 | `microsToCents(micros) = round(micros / 10000)` |
+| Micro-EUR per cent | 10,000 | `microsToCents(micros) = round(micros / 10000)` |

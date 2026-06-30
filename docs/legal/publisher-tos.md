@@ -76,10 +76,10 @@ This section is important — please read it carefully.
   payouts are live, and is always subject to clawback for invalid traffic, error
   correction, or breach of these Terms.
 - **Anonymous and revoked/expired devices earn nothing.** The pre-login sentinel
-  identity, and any revoked or expired device, accrue **$0**. Only verified
+  identity, and any revoked or expired device, accrue **€0**. Only verified
   views from a logged-in, active device accrue.
-- **Currency and minimums.** Earnings are tracked in micro-USD. A minimum payout
-  threshold of **US$25.00** applies (see §7); balances below the minimum carry
+- **Currency and minimums.** Earnings are tracked in micro-EUR. A minimum payout
+  threshold of **€25.00** applies (see §7); balances below the minimum carry
   forward.
 - **Taxes.** You are responsible for any taxes on amounts you receive, and for
   providing any tax information we (or our payment processor) are required to
@@ -90,7 +90,7 @@ This section is important — please read it carefully.
 Cleared advertiser revenue is shared on a **transparent, publisher-favored
 split**: the **publisher receives 60%** of cleared gross revenue for their
 verified delivery, and the platform retains 40%. The split is computed in integer
-micro-USD at clearing time. We will give reasonable notice before changing the
+micro-EUR at clearing time. We will give reasonable notice before changing the
 split.
 
 ## 6. Clearing and clawback (invalid traffic)
@@ -124,7 +124,7 @@ see §4).
   verification succeeds. You are responsible for any taxes on amounts you receive
   and for providing tax information that we or Stripe are required to collect. We
   may withhold amounts where required by law.
-- **7.3 Minimum and schedule.** The minimum payout is **US$25.00**. Eligible
+- **7.3 Minimum and schedule.** The minimum payout is **€25.00**. Eligible
   balances at or above the minimum are paid on a periodic batch; a balance below
   the minimum **carries forward** to a later batch until it reaches the minimum.
 - **7.4 Hold period (always longer than the clawback window).** A cleared
@@ -142,13 +142,15 @@ see §4).
   **offset** the clawed-back amount against your future earnings, or, where that
   is not possible, **request repayment**. Advertiser refunds do not by themselves
   reduce a correct publisher payout; only a clawback of *your* traffic does.
-- **7.7 Supported countries.** Payouts are available only where Stripe Connect
-  supports payouts to your country and your account is not subject to sanctions.
-  If your country is unsupported your account is marked payout-ineligible with a
-  reason; earnings continue to accrue and can be paid if support later becomes
-  available.
+- **7.7 Supported countries.** LumaLine operates from the European Union, so
+  payouts are currently available to publishers in the **European Economic Area
+  (EEA)** (the EU member states plus Iceland, Liechtenstein, and Norway), subject
+  to Stripe Connect support for your country and your account not being subject to
+  sanctions. If your country is unsupported your account is marked payout-ineligible
+  with a reason; earnings continue to accrue and can be paid if support later
+  becomes available.
 - **7.8 Currency, fees, and failed transfers.** Payouts are denominated in
-  **US dollars**. Currency conversion and any processor fees are handled by
+  **euros (EUR)**. Currency conversion and any processor fees are handled by
   Stripe and may apply. If a transfer fails or is returned (for example, a
   closed bank account), the amount is **restored to your balance** for a later
   retry once you correct the issue.
@@ -179,7 +181,7 @@ You may stop participating at any time (see §10).
 You are always in control:
 
 - `lumaline logout` revokes the device token and stops all earning and data flow
-  from that device; a revoked device accrues **$0**.
+  from that device; a revoked device accrues **€0**.
 - `lumaline uninstall` removes the status-line wiring and restores your prior
   Claude Code configuration.
 - You may request closure of your account and deletion of your data as described
@@ -205,7 +207,7 @@ or for lost profits or lost earnings, arising out of or relating to these Terms
 or your use of LumaLine. To the maximum extent permitted by law, our total
 aggregate liability to you for all claims relating to LumaLine will not exceed the
 greater of (a) the total cleared, payable earnings actually owed to you at the
-time the claim arose, or (b) **US$100**. Some jurisdictions do not allow certain
+time the claim arose, or (b) **€100**. Some jurisdictions do not allow certain
 limitations, so some of the above may not apply to you.
 
 ## 13. Changes to these Terms
