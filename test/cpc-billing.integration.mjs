@@ -126,7 +126,10 @@ test('CPC-2: /billing/charge bills the cleared cpc group exactly once; re-runnin
   }
 });
 
-test('CPC-3: a click whose parent impression never cleared does NOT bill', { skip: SKIP }, async () => {
+// NOTE: this proves the BILLING side ("no accrual ⇒ no ledger leg ⇒ never in the view"), not the
+// clearing-time gate itself. The cleared-parent EXISTS gate lives in clear_events()
+// (20260627033345_clearing_and_ledger.sql) and is a separate concern from this billing suite.
+test('CPC-3: an un-accrued click (no cleared-parent accrual) has no ledger legs and never surfaces in billing', { skip: SKIP }, async () => {
   const { advertiserId, lineItemId, publisherId } = seedAdvertiserCampaignLineItem({ is_house: false });
   const windowId      = randomUUID();
   const impressionId  = randomUUID();
