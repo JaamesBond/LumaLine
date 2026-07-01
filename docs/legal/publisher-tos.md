@@ -1,6 +1,6 @@
 # LumaLine Publisher Terms of Service
 
-**Last updated:** 2026-06-29 · **Effective:** 2026-06-29 · **Status:** §§1–6, 9–15 v1.0 in force (approved by Aivora SRL); **§7 Payouts and §8 Disputes payout additions are v1.1 DRAFT — pending owner sign-off** (added with the M3 payout rails, still test mode)
+**Last updated:** 2026-07-01 · **Effective:** 2026-07-01 · **Status:** **v1.1 in force** — all sections (§§1–15) approved by Aivora SRL; the **§7 Payouts and §8 Disputes payout additions were signed off 2026-07-01** (with the M3 payout rails). Real-money payouts remain gated on the production go-live milestone — Stripe operates in **TEST mode** until then (see §4).
 
 These Terms govern your participation as a **publisher** in LumaLine — the
 `lumaline` tool that shows a clearly-labeled, signed, sponsored line in the
