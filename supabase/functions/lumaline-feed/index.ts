@@ -188,11 +188,16 @@ Deno.serve(async (req) => {
     if (ad.house || !ad.line) return json({ error: "no fill" }, 503);
 
     const windowId = rpc.window_id as string;
-    // Self-promo MVP: the SIGNED link points straight at the advertiser site — clean, and the
-    // client shows no raw URL. No open-redirect risk: this URL is Ed25519-signed by us (not
-    // attacker-supplied) and the client re-validates http(s). Tracked, gross=0 CPC via the
-    // `click` fn (opaque token -> 302) returns at GA behind a branded domain. Env-overridable.
-    const clickUrl = Deno.env.get("LUMALINE_SELFPROMO_DEST") ?? "https://luma-line.lovable.app";
+    // Tokenized click redirect through the branded domain (c.lumaline.dev/c/<token>) so clicks
+    // are tracked → CPC. The opaque single-use token was minted by window_open and rides ONLY
+    // embedded in the Ed25519-signed adData.clickUrl (never returned separately); the `click` fn
+    // resolves it to a 302 at the advertiser dest. No open-redirect risk: the URL is signed by us
+    // and the client re-validates http(s). Falls back to the direct dest if no token was minted
+    // (defensive). LUMALINE_CLICK_BASE defaults to the branded proxy; override for local dev.
+    const dest = Deno.env.get("LUMALINE_SELFPROMO_DEST") ?? "https://luma-line.lovable.app";
+    const clickBase = Deno.env.get("LUMALINE_CLICK_BASE") ?? "https://c.lumaline.dev";
+    const token = rpc.click_token as string | undefined;
+    const clickUrl = token ? `${clickBase}/c/${token}` : dest;
     // Build the signed string ONCE and transport it verbatim. JSON.parse(adData).windowId
     // MUST equal windowId or the client refuses (window.mjs:41).
     const adData = JSON.stringify({ windowId, line: ad.line, label: ad.label ?? "sponsored", clickUrl });
