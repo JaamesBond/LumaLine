@@ -198,8 +198,9 @@ test('W6: account.updated from an unsupported country -> ineligible_country', { 
 
 // ---------------------------------------------------------------------------
 // W8–W11: multi-secret webhook verification (Task 7, M4). The served fn must have
-// STRIPE_WEBHOOK_SECRET set to a comma list containing BOTH secrets below, e.g.
-// STRIPE_WEBHOOK_SECRET="whsec_connect,whsec_platform" in supabase/functions/.env.
+// STRIPE_WEBHOOK_SECRET set to a comma list containing the pre-existing dev secret AND both
+// secrets below (dropping whsec_test_lumaline_local would break W1–W7), e.g.
+// STRIPE_WEBHOOK_SECRET="whsec_test_lumaline_local,whsec_connect,whsec_platform" in supabase/functions/.env.
 // ---------------------------------------------------------------------------
 const SECRET_CONNECT = 'whsec_connect';
 const SECRET_PLATFORM = 'whsec_platform';
@@ -232,7 +233,10 @@ test('W10: signature under an unknown secret → 400', { skip: SKIP }, async () 
 });
 
 test('W11: with two secrets, the platform-signed event verifies', { skip: SKIP }, async () => {
-  const body = JSON.stringify({ id: 'evt_rev1', type: 'transfer.reversed', data: { object: { id: 'tr_none', amount_reversed: 0, currency: 'eur' } } });
+  // Random event + transfer ids so a rerun against the same DB re-exercises verification
+  // (a fixed event_id would take the dedup 200 branch on the 2nd run). No matching payout →
+  // the fn's "no matching payout" 200 branch, which still requires the signature to verify.
+  const body = evt('transfer.reversed', { id: `tr_none_${randomUUID().slice(0, 8)}`, object: 'transfer', amount_reversed: 0, currency: 'eur' });
   const sig = stripeSig(body, SECRET_PLATFORM);
   const res = await postWebhook(body, sig);
   assert.equal(res.status, 200);
