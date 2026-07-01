@@ -40,6 +40,7 @@ import {
   sumLumalineTransfersMicros,
   reversedMicrosFromTransfer,
 } from "../_shared/payout-logic.mjs";
+import { parseWebhookSecrets } from "../_shared/webhook-secrets.mjs";
 
 const cors = { ...corsHeaders, "Access-Control-Allow-Methods": "GET, POST, OPTIONS" } as const;
 
@@ -154,16 +155,23 @@ Deno.serve(async (req) => {
   if (req.method === "POST" && path.endsWith("/webhook")) {
     const sig = req.headers.get("stripe-signature");
     if (!sig) return jsonErr("Missing Stripe-Signature", 400);
-    const secret = Deno.env.get("STRIPE_WEBHOOK_SECRET") ?? "";
-    if (!secret) return jsonErr("Webhook secret not configured", 503);
+
+    // Multi-secret verify (M4): STRIPE_WEBHOOK_SECRET is a comma-separated list so ONE
+    // function can verify events signed by MULTIPLE Stripe endpoints (the connected-account
+    // endpoint sending account.updated + a platform-scoped endpoint sending
+    // transfer.reversed). A single configured secret is just a 1-element list — backward
+    // compatible with the pre-M4 single-secret setup.
+    const secrets = parseWebhookSecrets(Deno.env.get("STRIPE_WEBHOOK_SECRET") ?? "");
+    if (secrets.length === 0) return jsonErr("Webhook secret not configured", 503);
 
     const raw = await req.text(); // TRAP #1: raw body, never req.json() first.
-    let event: Stripe.Event;
-    try {
-      event = await getStripe().webhooks.constructEventAsync(raw, sig, secret);
-    } catch (err: unknown) {
-      return jsonErr(`Signature verification failed: ${(err as { message?: string }).message ?? "bad signature"}`, 400);
+    let event: Stripe.Event | null = null;
+    let lastErr = "bad signature";
+    for (const secret of secrets) {
+      try { event = await getStripe().webhooks.constructEventAsync(raw, sig, secret); break; }
+      catch (err: unknown) { lastErr = (err as { message?: string }).message ?? "bad signature"; }
     }
+    if (!event) return jsonErr(`Signature verification failed: ${lastErr}`, 400);
 
     // Dedup ordering (review finding D): CHECK first, but only RECORD after the handler
     // succeeds. Recording before handling meant a handler/infra failure left a dedup row
