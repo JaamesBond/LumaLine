@@ -11,9 +11,20 @@
 //   W4 — transfer.reversed unwinds a PAID payout (status failed, ledger nets to zero)
 //   W5 — a missing Stripe-Signature header is REJECTED (400)
 //   W6 — account.updated from an unsupported country -> ineligible_country
+//   W7 — transfer.reversed for an unknown transfer is a recorded 2xx ack (not retried)
+//
+// Task 7 (M4) — multi-secret verification (parseWebhookSecrets, connected + platform
+// endpoints can share one function):
+//   W8  — platform-secret-signed transfer.reversed verifies when its secret is in the list
+//   W9  — connected-secret-signed account.updated verifies
+//   W10 — a signature under a secret NOT in the configured list -> 400
+//   W11 — with two secrets configured, either valid signature passes
 //
 // Requires `supabase functions serve` running with the test secret + STRIPE_SECRET_KEY
 // (constructEventAsync needs the SDK). Self-skips if the function or psql is unavailable.
+// W8–W11 additionally require STRIPE_WEBHOOK_SECRET to be a comma-separated list that
+// includes BOTH 'whsec_connect' and 'whsec_platform' (see SECRET_CONNECT/SECRET_PLATFORM
+// below) — they self-skip via the same SKIP gate when the served fn isn't reachable.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -46,9 +57,15 @@ function evt(type, object) {
 
 async function fnUp() {
   try {
-    // No signature -> the handler returns 400 (missing sig) if it is reachable.
+    // No signature -> the handler returns 400 (missing sig) if it is reachable, or 503 if
+    // the webhook secret isn't configured. BOTH are our own function's error shape
+    // ({ error: ... }, see jsonErr). Kong front-ending a STOPPED edge-runtime also answers
+    // with 503, but with a different shape ({ message: 'name resolution failed' }) — that
+    // must NOT be mistaken for "reachable", or every test below fails instead of skipping.
     const r = await fetch(`${FN_BASE}/webhook`, { method: 'POST', headers: { apikey: ANON }, body: '{}', signal: AbortSignal.timeout(3000) });
-    return r.status === 400 || r.status === 503; // reachable (503 if secret missing)
+    if (r.status !== 400 && r.status !== 503) return false;
+    const data = await r.json().catch(() => null);
+    return !!data && typeof data === 'object' && 'error' in data;
   } catch { return false; }
 }
 function psqlWorks() { try { return psql('select 1') === '1'; } catch { return false; } }
@@ -177,4 +194,46 @@ test('W6: account.updated from an unsupported country -> ineligible_country', { 
   assert.equal(res.data?.eligibility, 'ineligible_country');
   const status = psql(`select payout_status from public.publishers where id='${pubId}';`);
   assert.equal(status, 'ineligible_country');
+});
+
+// ---------------------------------------------------------------------------
+// W8–W11: multi-secret webhook verification (Task 7, M4). The served fn must have
+// STRIPE_WEBHOOK_SECRET set to a comma list containing BOTH secrets below, e.g.
+// STRIPE_WEBHOOK_SECRET="whsec_connect,whsec_platform" in supabase/functions/.env.
+// ---------------------------------------------------------------------------
+const SECRET_CONNECT = 'whsec_connect';
+const SECRET_PLATFORM = 'whsec_platform';
+
+test('W8: platform-secret-signed transfer.reversed verifies when its secret is in the list', { skip: SKIP }, async () => {
+  const acct = `acct_test_${randomUUID().slice(0, 8)}`;
+  const pubId = newPublisher({ acct, country: 'DE', payout_status: 'verified' });
+  const transferId = `tr_test_${randomUUID().slice(0, 8)}`;
+  const payoutId = newPaidPayout(pubId, transferId, 10_000_000); // €10 = 1000 cents
+  const payload = evt('transfer.reversed', { id: transferId, object: 'transfer', amount: 1000, amount_reversed: 1000, currency: 'eur', metadata: { source: 'lumaline', payout_id: payoutId } });
+  const res = await postWebhook(payload, stripeSig(payload, SECRET_PLATFORM));
+  assert.equal(res.status, 200, `expected 200: ${JSON.stringify(res.data)}`);
+});
+
+test('W9: connected-secret-signed account.updated verifies', { skip: SKIP }, async () => {
+  const acct = `acct_test_${randomUUID().slice(0, 8)}`;
+  const pubId = newPublisher({ acct, country: 'DE', payout_status: 'pending' });
+  const payload = evt('account.updated', { id: acct, object: 'account', charges_enabled: true, payouts_enabled: true, details_submitted: true, country: 'DE' });
+  const res = await postWebhook(payload, stripeSig(payload, SECRET_CONNECT));
+  assert.equal(res.status, 200, `expected 200: ${JSON.stringify(res.data)}`);
+  const status = psql(`select payout_status from public.publishers where id='${pubId}';`);
+  assert.equal(status, 'verified');
+});
+
+test('W10: signature under an unknown secret → 400', { skip: SKIP }, async () => {
+  const body = JSON.stringify({ id: 'evt_x', type: 'account.updated', data: { object: {} } });
+  const sig = stripeSig(body, 'whsec_NOT_CONFIGURED');
+  const res = await postWebhook(body, sig);
+  assert.equal(res.status, 400);
+});
+
+test('W11: with two secrets, the platform-signed event verifies', { skip: SKIP }, async () => {
+  const body = JSON.stringify({ id: 'evt_rev1', type: 'transfer.reversed', data: { object: { id: 'tr_none', amount_reversed: 0, currency: 'eur' } } });
+  const sig = stripeSig(body, SECRET_PLATFORM);
+  const res = await postWebhook(body, sig);
+  assert.equal(res.status, 200);
 });
