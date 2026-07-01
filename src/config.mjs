@@ -51,10 +51,12 @@ export const FEED_BASE = env.LUMALINE_FEED ||
 // the feed serves (branded default → https://feed.lumaline.dev/auth-device).
 export const AUTH_BASE = env.LUMALINE_AUTH || FEED_BASE.replace(/\/lumaline-feed\/?$/, '/auth-device');
 
-// Click-redirect base. The feed signs `${CLICK_BASE}/c/${token}` as the ad's clickUrl; the
-// `click` edge fn resolves the token → 302. Defaults to the branded c.lumaline.dev (same
-// Cloudflare proxy). Env-overridable with LUMALINE_CLICK (e.g. the raw *.supabase.co/functions/v1/click
-// URL for local dev). The tokenized redirect is emitted by the feed only when it has a click token.
+// Canonical branded click host, for reference/tooling only. The CLIENT does NOT build click
+// URLs from this — it renders the `clickUrl` string carried in the *signed* feed payload verbatim
+// (statusline.mjs → safeClickUrl). The feed builds `${host}/c/${token}` server-side from its OWN
+// env var `LUMALINE_CLICK_BASE` (see supabase/functions/lumaline-feed), so this constant does not
+// drive the feed. Default is the branded c.lumaline.dev (same Cloudflare proxy); env-overridable
+// with LUMALINE_CLICK. Kept as the documented canonical host and to pin the default in tests.
 export const CLICK_BASE = env.LUMALINE_CLICK || 'https://c.lumaline.dev';
 
 // Refresh the short-lived device access token this many ms BEFORE it expires, so a window the
