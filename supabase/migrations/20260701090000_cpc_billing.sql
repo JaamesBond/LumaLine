@@ -63,6 +63,9 @@ CREATE OR REPLACE VIEW app.v_billing_recon AS
     AND state      = 'cleared'
   GROUP BY 1
   ORDER BY 1 DESC;
+-- Re-assert security_invoker on replace (private app schema, service_role-only; keeps the
+-- "views are security_invoker=on" posture consistent even though this view is not PostgREST-reachable).
+ALTER VIEW app.v_billing_recon SET (security_invoker = on);
 GRANT SELECT ON app.v_billing_recon TO service_role;
 
 CREATE OR REPLACE FUNCTION public.billing_recon_totals(from_ts timestamptz, to_ts timestamptz)
