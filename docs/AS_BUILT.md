@@ -319,6 +319,57 @@ platform profile (or do one browser Express onboarding) for the completed-transf
 test-mode verify (onboarding + a real completed EUR transfer + recon). Sign `publisher-tos.md §7` (EUR).
 T6 monitoring, T7 external review, T8 publisher dashboard remain owner-supplied.
 
+### ✅ M3 REMOTE DEPLOY — DONE (2026-07-01, `prmsonskzrubqsazmpwd`, Stripe TEST/sandbox)
+
+Path B executed against the production project (owner-authorized). All writes via the ref-guarded PAT
+runner (asserts ref before every query) + the Supabase CLI (`--use-api`); never the Supabase MCP.
+
+- **Drift reconciled** — the M1 `device_code_flow` ledger row was re-stamped `20260629114856 → 20260629010000`
+  (version-only `UPDATE`, name/statements preserved). Pending set then = exactly the 11 M2+M3 migrations.
+- **Migrations applied in order (atomic DDL + ledger row each)** — M2 `020000..070000`, M3 `080000..110000`.
+  Remote `schema_migrations` == the 26 local files, 0 orphans. Object set == migrations (all M2/M3 tables,
+  RPCs, views present).
+- **Edge fns deployed** (`--use-api`, `_shared/{cors,jwt}.ts` + `payout-logic.mjs` bundled) — `billing`,
+  `admin-booking`, `stripe-connect`; all `verify_jwt=false`, ACTIVE. (Full set live: `lumaline-feed`,
+  `auth-device`, `click`, `billing`, `admin-booking`, `stripe-connect`.)
+- **🔒 Security fix surfaced by `get_advisors`** — deploying M2 (never advisor-checked on remote) exposed a
+  **publicly-reachable `SECURITY DEFINER` view** `public.uncharged_advertiser_billings` granted to `anon`
+  (advertiser billing data readable with the anon key, bypassing RLS — 1 ERROR) plus two anon-executable
+  SECDEF fns (`billing_recon_totals`, `check_house_bids` — 2 WARN). Root cause = the Supabase default-priv
+  grant gotcha (migrations granted `service_role` but never revoked the auto-granted anon/authenticated).
+  Fixed forward in **`20260629120000_secdef_grant_hardening.sql`** (revoke anon/authenticated + `security_invoker=on`).
+  Post-fix advisors: **0 ERROR/CRITICAL** (remaining 15 WARN = accepted-by-design self-scoping RPCs + email-OTP).
+  `supabase db reset` applies all 26 clean; `node --test` **225 tests / 218 pass / 7 skip / 0 fail**.
+- **Webhook wired** — a Connect endpoint (`account.updated`) created via the Stripe API against
+  `…/functions/v1/stripe-connect/webhook`; its `whsec` stored in Vault as `STRIPE_WEBHOOK_SECRET` (never
+  logged); `stripe-connect` redeployed. Verified: missing-sig → **400**, bad-sig → **400** (secret loaded).
+
+**✅ Live test-mode e2e on the remote (2026-07-01) — the completed transfer, previously owner-blocked, is now proven:**
+- Onboarding: a **headless Custom** connected account (after the owner acknowledged the Connect platform
+  profile) filled entirely via API (identity + address + DOB + ToS + RO test IBAN) → `transfers: active`,
+  `payouts_enabled: true`.
+- **Live webhook** on the remote: a real Stripe-signed `account.updated` → verified vs `STRIPE_WEBHOOK_SECRET`
+  → deduped → `set_publisher_payout_eligibility` → publisher `verified`.
+- **Completed EUR transfer**: platform EUR balance funded (`pm_card_bypassPending`); `/payout/batch` (admin) →
+  reserve → real `transfers.create` **€30.00 EUR** (`tr_…`) → `payout_confirm` booked the balanced ledger
+  group (`publisher_earnings +30M / platform_cash −30M`, sum 0); payable → 0.
+- **Reconcile**: `/reconcile` **green** (DB 30,000,000 == Stripe 30,000,000, discrepancy 0). After a real full
+  transfer reversal it correctly flips to **`ok:false` (DB 30M vs Stripe 0)** — the reversal-detection backstop.
+- **`transfer.reversed` → `payout_reverse`** proven live: the real event delivered to the deployed fn →
+  inverse ledger booked (group nets 0), `reversed_micros=30M`, payout `failed`, payable **restored** to €30.
+- All e2e test data cleaned up (DB rows + Stripe test accounts deleted); ledger back to 0 legs, `app.admins` empty.
+
+**Production note (webhook delivery gap, M4 follow-up):** the registered endpoint is `connect=true`, so it
+receives connected-account `account.updated` but **not** platform-owned `transfer.reversed` (which routes to
+platform endpoints). The single-secret function can't verify two endpoints, so auto-reversal handling is
+deferred: today `/reconcile` **detects** reversals (proven above) and `payout_reverse` is applied by resend/operator;
+M4 adds a platform endpoint + multi-secret verification. Also `LUMALINE_APP_URL` is unset → the onboarding
+return/refresh default to `localhost:3000`; set it to the real payouts-return page at M4.
+
+**Still owner-gated after the deploy:** app.admins seeding of the real admin UUID for production ops; sign
+`publisher-tos.md §7` (EUR); **T6** money-path monitoring; **T7** external security review (hard M5 gate);
+**T8** publisher dashboard; the **M5** test→live key swap (never done here — TEST only). Merge PR #7.
+
 ---
 
 ## 6. Deferral ledger
