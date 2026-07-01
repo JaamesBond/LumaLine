@@ -34,19 +34,28 @@ export const PUB = env.LUMALINE_PUBKEY || (existsSync(bundledPub) ? bundledPub :
 // rotation (or compromise response) never blacks out installed clients. See src/lib/keyring.mjs.
 export const KEYS_DIR = env.LUMALINE_KEYS_DIR || fileURLToPath(new URL('./keys', import.meta.url));
 
-// Feed endpoint. Defaults to the live remote signed self-promo feed (the lumaline-feed
-// edge function on the prod Supabase project); override with LUMALINE_FEED for local dev
-// (e.g. http://127.0.0.1:8787 against poc/backend, or a Supabase preview branch URL).
+// Feed endpoint. Defaults to the branded domain (feed.lumaline.dev, a Cloudflare Worker
+// reverse-proxy in front of the lumaline-feed edge function on the prod Supabase project —
+// see docs/ops/cloudflare-proxy-worker.js). GA ships pinned to this stable branded URL because
+// installed clients never self-update, so a cohort pinned to *.supabase.co could never be moved.
+// Override with LUMALINE_FEED for local dev (e.g. http://127.0.0.1:8787 against poc/backend, a
+// Supabase preview branch, or the raw *.supabase.co URL).
 export const PORT = Number(env.LUMALINE_PORT || 8787);
 export const FEED_BASE = env.LUMALINE_FEED ||
-  'https://prmsonskzrubqsazmpwd.supabase.co/functions/v1/lumaline-feed';
+  'https://feed.lumaline.dev/lumaline-feed';
 
 // Auth endpoint — the `auth-device` edge function (RFC 8628 device-code login + token
-// refresh + earnings proxy). Defaults to the sibling of FEED_BASE on the same project, so a
+// refresh + earnings proxy). Defaults to the sibling of FEED_BASE on the same host, so a
 // single LUMALINE_FEED override (e.g. a preview branch) moves both; override independently
 // with LUMALINE_AUTH for local dev. Reuses FEED_BASE's host so login targets the same project
-// the feed serves.
+// the feed serves (branded default → https://feed.lumaline.dev/auth-device).
 export const AUTH_BASE = env.LUMALINE_AUTH || FEED_BASE.replace(/\/lumaline-feed\/?$/, '/auth-device');
+
+// Click-redirect base. The feed signs `${CLICK_BASE}/c/${token}` as the ad's clickUrl; the
+// `click` edge fn resolves the token → 302. Defaults to the branded c.lumaline.dev (same
+// Cloudflare proxy). Env-overridable with LUMALINE_CLICK (e.g. the raw *.supabase.co/functions/v1/click
+// URL for local dev). The tokenized redirect is emitted by the feed only when it has a click token.
+export const CLICK_BASE = env.LUMALINE_CLICK || 'https://c.lumaline.dev';
 
 // Refresh the short-lived device access token this many ms BEFORE it expires, so a window the
 // statusline opens stays attributed for its full dwell. The refresh is best-effort + bounded
