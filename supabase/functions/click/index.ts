@@ -19,11 +19,14 @@ import { serviceRpc } from "../_shared/jwt.ts";
 function extractToken(url: URL): string | null {
   const q = url.searchParams.get("token");
   if (q) return q;
-  // Path forms: /click/<token> or /functions/v1/click/<token>
+  // Path forms: /click/<token>, /functions/v1/click/<token>, and the branded /c/<token> redirect
+  // (c.lumaline.dev/c/<token> proxies to /functions/v1/click/c/<token>) — skip the leading 'c' segment.
   const parts = url.pathname.split("/").filter(Boolean);
   const idx = parts.lastIndexOf("click");
-  if (idx >= 0 && parts.length > idx + 1) return decodeURIComponent(parts[idx + 1]);
-  return null;
+  if (idx < 0) return null;
+  let next = idx + 1;
+  if (parts[next] === "c" && parts.length > next + 1) next += 1; // skip the /c/ redirect segment
+  return parts.length > next ? decodeURIComponent(parts[next]) : null;
 }
 
 Deno.serve(async (req) => {
