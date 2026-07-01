@@ -236,6 +236,11 @@ docs/                   design, feasibility, GTM
   - *Plain terminals:* the destination is shown **inline as a visible `https://…` by default**, so
     your terminal's own URL detection can open it — **kitty** `ctrl+click` (or `ctrl+shift+e`),
     **foot** `ctrl+shift+u` (url-mode) — or just copy/paste. Hide it with `LUMALINE_SHOW_URL=0`.
+  - *Re-test checklist (each Claude Code release):* the last version with a working status-bar OSC-8
+    link was **v2.1.2**. After every upgrade, in a **standalone** terminal (foot/kitty): `lumaline install`,
+    trigger a wait-state, and click the sponsored line. If it opens the browser, #26356 is fixed → widen
+    CPC scope to all terminals + note the fixed version here. If not, CPC stays IDE-terminals-only. Record
+    the Claude Code version + pass/fail with each check.
 
 We'd rather under-promise here than oversell. [Track progress / get launch access →](https://luma-line.lovable.app)
 

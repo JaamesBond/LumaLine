@@ -1,8 +1,8 @@
 # LumaLine — AS-BUILT Reconciliation & Deferral Ledger
 
 **Status:** Authoritative map of what *is built* vs. what the older design docs *describe*.
-**As of:** 2026-06-28 (milestone **M0**, task **M0-T6**).
-**Branch:** `feat/m0-production-rails` (based on `origin/main`).
+**As of:** 2026-07-01 (milestone **M4** code-complete — branded domain + CPC money-path, TEST mode; see §5c).
+**Branch:** `feat/m4-cpc-and-branded-url` (based on `main` after PR #9). Earlier milestones: M0 `feat/m0-production-rails`.
 **Backend project:** Supabase `prmsonskzrubqsazmpwd` (the LumaLine project — **not** the unrelated CRM `kvlfpwzmjxuapjheknnj`).
 
 > Read **this** doc and the **code** for what *is*. Read `docs/` for what's *planned*. Where the two
@@ -372,6 +372,65 @@ return/refresh default to `localhost:3000`; set it to the real payouts-return pa
 
 ---
 
+## 5c. M4 as-built deltas (branded domain + CPC money-path + GA-publish prep — TEST mode)
+
+Branch `feat/m4-cpc-and-branded-url` (13 commits, base `main` after PR #9). Spec/plan:
+`docs/superpowers/specs/2026-07-01-m4-cpc-money-path-and-url-plumbing-design.md` +
+`docs/superpowers/plans/2026-07-01-m4-implementation.md`. Executed subagent-driven; ops steps (remote
+apply, Cloudflare, Stripe, deploys) driven by the ref-guarded PAT runner + Supabase CLI, never the MCP.
+Stays **TEST mode** — the live-key swap is still M5.
+
+- **D1 — CPC folded into the money-path (1 migration).** `20260701090000_cpc_billing.sql` extends
+  `public.uncharged_advertiser_billings` with a **UNION branch that joins `public.clicks`**: CPC ledger
+  legs carry `source_type='click'`, `source_id=clicks.id`, `impression_id IS NULL`, so the advertiser is
+  resolved `clicks → line_items → campaigns → advertisers` (not the CPVA `impressions` path). `billing_recon_totals`
+  and `app.v_billing_recon` now filter `event_type IN ('cpva_accrual','cpc_accrual')`. `app.publisher_payable_micros`
+  **drops the loud CPC RAISE guard** and adds a clicks-joined CPC-earned term (`RETURN v_earned_cpva +
+  v_earned_cpc - v_paid`). The migration re-asserts `security_invoker=on` + REVOKE anon/authenticated +
+  GRANT service_role on both views. `/billing/charge` is **view-driven → no edge-fn change**. Applied to
+  remote (**27 migrations**, advisors **0 ERROR/CRITICAL**). **Acceptance #2 proven on remote**: a seeded
+  cleared CPC group resolves through the clicks branch → `/billing/charge?dry_run` lists it (`would_charge=1`).
+- **D4 — client defaults flipped to the branded domain.** `src/config.mjs`: `FEED_BASE` default →
+  `https://feed.lumaline.dev/lumaline-feed`; **new `CLICK_BASE`** = `LUMALINE_CLICK || https://c.lumaline.dev`;
+  `AUTH_BASE` derives to `https://feed.lumaline.dev/auth-device`. Env overrides preserved. `test/config-urls.test.mjs`
+  (3 tests) pins the branded defaults + override behaviour.
+- **T1b — Cloudflare reverse-proxy (domain live in Cloudflare).** Worker `lumaline-proxy` + Custom Domains
+  `feed.lumaline.dev` and `c.lumaline.dev` (auto DNS + TLS), zone `28a0e8867b12d3b35abf869c6a577399`. It host+path
+  rewrites `feed.lumaline.dev/<fn>/*` → `…/functions/v1/<fn>/*` and `c.lumaline.dev/*` → `…/functions/v1/click/*`
+  (drops the inbound `host`). **The Ed25519-signed feed still verifies through the branded host** (keyid
+  `8720926064dfdf50` — signing is domain-agnostic, so the trust thesis holds across the proxy). As-built:
+  `docs/ops/cloudflare-proxy-worker.js`.
+- **D2 — feed emits a branded tokenized click redirect.** `lumaline-feed` emits
+  `clickUrl = token ? ${CLICK_BASE}/c/${token} : dest` (`LUMALINE_CLICK_BASE` set on remote); the `click` fn's
+  `extractToken` now **skips a leading `/c/` segment** (bug found during verify: it had returned the literal
+  `'c'` as the token). Redeployed. **Verified e2e**: feed → `c.lumaline.dev/c/<token>` → **302** → destination.
+- **D3 — multi-secret webhook verify + platform endpoint (closes the M3 §5b delivery gap).** New
+  `_shared/webhook-secrets.mjs` `parseWebhookSecrets()` (comma-split); `stripe-connect` verifies an event
+  against **each** configured secret (raw body read once, try each, 400 if none, 503 if zero configured).
+  A **platform endpoint** `we_1ToQ5kCChUMF5SBOkkIbkaXO` (`transfer.reversed` + `transfer.canceled`,
+  `connect=account`) was created; Vault `STRIPE_WEBHOOK_SECRET` is now the **comma-split pair**
+  `<we_1To11 connect secret>,<platform secret>`; `stripe-connect` redeployed. **Verified on remote**:
+  platform-signed `transfer.reversed` → **200**, `we_1To11`-signed `account.updated` → **200** (backward-compat
+  holds), bogus secret → **400**. The stale `we_1To11` Connect endpoint is **kept** (owner revealed its secret;
+  nothing deleted). Auto `transfer.reversed` is now handled inline — defense-in-depth over the `/reconcile` backstop.
+- **D5 — `LUMALINE_APP_URL=https://lumaline.dev`** set in Vault (onboarding return/refresh no longer default
+  to `localhost:3000`); `stripe-connect` redeployed.
+- **D6 (README) — OSC-8 scoping + per-release re-test checklist.** README documents CPC status-bar clicks as
+  **IDE-terminals-only today** (upstream regression #26356, last-good v2.1.2) and adds a per-release re-test
+  checklist so the standalone-terminal fix is picked up when it lands. No client-side fix exists.
+- **Tests.** Unit `node --test` grew to **147 pass / 0 fail** (new hermetic guards `cpc-billing.test.mjs`,
+  `webhook-multi-secret.test.mjs`, `config-urls.test.mjs`). New integration files (`cpc-billing.integration.mjs`,
+  W8–W11 in `stripe-connect-webhook.integration.mjs`, P17 in `payout-rails.integration.mjs`) **self-skip cleanly**
+  without the local Supabase stack; full-suite count only grows from 225 (runs green in CI/local-stack).
+
+**⏳ Still owner-gated (T4, GA npm publish):** the package is **publish-ready** but deliberately **not published** —
+`npm pack --dry-run` is clean (15 files; ships only the public verify keys `public.pem`+`next.pem`, no `poc/`,
+`.env`, or private key), name `lumaline@0.1.0`, **`private:true` retained by owner choice** ("publish later"). GA is:
+flip `private:false` + owner-triggered tag → `release.yml` (OIDC provenance). npm publish is irreversible/outward-facing
+→ needs an explicit owner go-ahead at the publish moment even though M4 authorized it.
+
+---
+
 ## 6. Deferral ledger
 
 Genuine deferrals, recorded so none is silently lost. Each names the **reason** and the **milestone/owner**
@@ -384,11 +443,13 @@ that closes it.
 | **D3** | **Next-key private custody in Vault.** | The `keyid` mechanism + the **public** next key (`31433cdee001fc81`) ship now so clients trust it *before* the feed flips. | ✅ **DONE 2026-06-29** — next private stored in Vault as `LUMALINE_ED25519_NEXT_PRIVATE_KEY` (byte-verified vs the local PEM), disk copy shredded. |
 | **D4** | **`schema_migrations` history repair** (the 2 out-of-band versions + the drift-capture row). | Objects/grants were already live and the migrations are idempotent; the gap was the **history table** only. | ✅ **DONE 2026-06-29** — history reconciled to **13** versions; future `db push` is clean. |
 | **D5** | **Per-publisher earnings / payouts** (device-code `lumaline login`, attribution off the sentinel, Stripe charging + Connect payouts, money-safety gates, independent security review). | The beta is intentionally **sentinel-only, `gross = 0`, never billed** — *see it live today, not get paid today*. The full money machine is built + proven in **Stripe test mode** before a single real dollar moves, behind legal and security gates. | **M1–M3** (test mode), **M5** (live go-live) |
-| **D6** | **Branded domain + CPC measurement + GA npm publish.** | Installed clients don't self-update, so GA must ship on the **stable branded URL** and **rotation-safe** (the M0 `keyid` work is its hard prerequisite). Until then the beta installs via `npm i -g github:JaamesBond/LumaLine`. CPC is also gated by upstream OSC-8 bug #26356 (clicks in IDE terminals only today). | **M4** |
+| **D6** | **Branded domain + CPC measurement + GA npm publish.** | Installed clients don't self-update, so GA must ship on the **stable branded URL** and **rotation-safe** (the M0 `keyid` work is its hard prerequisite). Until then the beta installs via `npm i -g github:JaamesBond/LumaLine`. CPC is also gated by upstream OSC-8 bug #26356 (clicks in IDE terminals only today). | **M4** — ✅ **branded domain + CPC money-path DONE 2026-07-01** (§5c); **GA npm publish still owner-gated** (`private:true` retained by owner choice → flip + tag when ready). |
 | **D7** | **Scale / ops deferrals:** load-test validation of the ~15k writes/s ceiling, richer IVT heuristics (data-min-safe), advertiser API keys, full dashboards/on-call runbook, DR-at-scale. | Not on the money-honesty critical path; the money-critical alerts (ledger-imbalance, payout-failure, reconciliation) land earlier at M3-T6. | **M6** |
 | **D8** | **M1 — orphaned `open` window** when a revoked device's `window_open` is retried under the sentinel (the client keeps sending its real token, so the sentinel window's beats/close 401 and it never closes). | **Harmless:** `gross=0`, never credits, no double-bill, no crash; the access token expires in ≤15 min and the existing Phase-4 `sweep_stale_windows` cron abandons stale-open rows. | **M4/M6** (optional: signal client demotion in the open reply) |
 | **D9** | **M1 — refresh token has no absolute lifetime + no reuse-detection** (OAuth refresh-rotation BCP). | Bounded by the short **900s** access TTL, 0600 at-rest storage, **manual `device_revoke`**, and the per-window `revoked_at` re-check on the billing path. No payouts until M5. | **M3** (security review): add `devices.refresh_expires_at` + superseded-hash reuse detection → auto-revoke device family |
 | **D10** | **M1 — `/earnings` does not re-check `devices.revoked_at`** (a token minted just before logout can read its *own* earnings until exp ≤15 min). | **Self-data only**, RLS-scoped to the caller; zero billing/cross-publisher impact; time-bounded by the short TTL. | **M3** (add a server-side `revoked_at` check on the `/earnings` handler) |
+| **D11** | **M4 — CPC advertiser charges have no automated Stripe refund path.** The refund handler (`billing/index.ts`) looks up `advertiser_charges` by `impression_id`, but CPC charges carry `impression_id = NULL`, so a CPC charge can only be **manually** refunded via Stripe today. | **Internal ledger stays correct**: `public.clawback` reverses *both* the impression and click ledger groups for the window, so this is missing Stripe-side *automation* only, not ledger corruption. M4's scope was "wire CPC into the money path"; M4 creates the precondition, so the refund automation is a tracked follow-up. Manual refund remains available. | **M5/M6** (add a click-keyed branch to the refund handler + `clawback_reviews`) |
+| **D12** | **M4 — webhook integration tests W8/W9/W11 hard-fail (don't skip) on a partially-configured stack.** They assert `200` for platform/connect-signed events, so a `supabase functions serve` running with only the local dev secret yields `400` → red instead of skip. | Cosmetic test-hygiene gap: the whole integration suite already requires a manually-configured stack + `.env` (the header documents the two-secret precondition); a correctly-configured stack passes. W10 (asserts `400`) is robust regardless. No production impact. | **M6** (gate W8/W9/W11 on served-secret presence) |
 
 ---
 
