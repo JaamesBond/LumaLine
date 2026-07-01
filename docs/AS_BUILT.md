@@ -1,7 +1,7 @@
 # LumaLine — AS-BUILT Reconciliation & Deferral Ledger
 
 **Status:** Authoritative map of what *is built* vs. what the older design docs *describe*.
-**As of:** 2026-07-01 (milestone **M4** code-complete — branded domain + CPC money-path, TEST mode; see §5c).
+**As of:** 2026-07-01 (milestone **M4** DONE — branded domain + CPC money-path (TEST) + **GA npm publish `lumaline@0.1.0` LIVE**; see §5c).
 **Branch:** `feat/m4-cpc-and-branded-url` (based on `main` after PR #9). Earlier milestones: M0 `feat/m0-production-rails`.
 **Backend project:** Supabase `prmsonskzrubqsazmpwd` (the LumaLine project — **not** the unrelated CRM `kvlfpwzmjxuapjheknnj`).
 
@@ -423,11 +423,14 @@ Stays **TEST mode** — the live-key swap is still M5.
   W8–W11 in `stripe-connect-webhook.integration.mjs`, P17 in `payout-rails.integration.mjs`) **self-skip cleanly**
   without the local Supabase stack; full-suite count only grows from 225 (runs green in CI/local-stack).
 
-**⏳ Still owner-gated (T4, GA npm publish):** the package is **publish-ready** but deliberately **not published** —
-`npm pack --dry-run` is clean (15 files; ships only the public verify keys `public.pem`+`next.pem`, no `poc/`,
-`.env`, or private key), name `lumaline@0.1.0`, **`private:true` retained by owner choice** ("publish later"). GA is:
-flip `private:false` + owner-triggered tag → `release.yml` (OIDC provenance). npm publish is irreversible/outward-facing
-→ needs an explicit owner go-ahead at the publish moment even though M4 authorized it.
+**✅ T4 GA npm publish — DONE 2026-07-01. `lumaline@0.1.0` is LIVE on npm** with SLSA v1 provenance
+(`dist-tags.latest=0.1.0`; registry `[0.0.1, 0.1.0]` — supersedes the 0.0.1 reservation stub). Path: removed
+`"private": true` → owner merged PR #10 (then a follow-up merge #11 landed the flip on `main`, tip `88d38a7`) → tag
+`v0.1.0` → `.github/workflows/release.yml` ran the fail-closed tarball audit (15 files; public verify keys
+`public.pem`+`next.pem` only; no `poc/`/`.env`/private key) + `node --test` gate + `npm publish --provenance`. Auth
+required an npm **Automation** token (a classic *Publish* token hit `EOTP` — 2FA can't be satisfied non-interactively
+in CI); the token is now the repo secret `NPM_TOKEN`. Both a final `/security-review` (0 findings) and a code review
+were clean before publish. Future GA bumps: version bump → merge to `main` → push a `v*` tag.
 
 ---
 
@@ -443,7 +446,7 @@ that closes it.
 | **D3** | **Next-key private custody in Vault.** | The `keyid` mechanism + the **public** next key (`31433cdee001fc81`) ship now so clients trust it *before* the feed flips. | ✅ **DONE 2026-06-29** — next private stored in Vault as `LUMALINE_ED25519_NEXT_PRIVATE_KEY` (byte-verified vs the local PEM), disk copy shredded. |
 | **D4** | **`schema_migrations` history repair** (the 2 out-of-band versions + the drift-capture row). | Objects/grants were already live and the migrations are idempotent; the gap was the **history table** only. | ✅ **DONE 2026-06-29** — history reconciled to **13** versions; future `db push` is clean. |
 | **D5** | **Per-publisher earnings / payouts** (device-code `lumaline login`, attribution off the sentinel, Stripe charging + Connect payouts, money-safety gates, independent security review). | The beta is intentionally **sentinel-only, `gross = 0`, never billed** — *see it live today, not get paid today*. The full money machine is built + proven in **Stripe test mode** before a single real dollar moves, behind legal and security gates. | **M1–M3** (test mode), **M5** (live go-live) |
-| **D6** | **Branded domain + CPC measurement + GA npm publish.** | Installed clients don't self-update, so GA must ship on the **stable branded URL** and **rotation-safe** (the M0 `keyid` work is its hard prerequisite). Until then the beta installs via `npm i -g github:JaamesBond/LumaLine`. CPC is also gated by upstream OSC-8 bug #26356 (clicks in IDE terminals only today). | **M4** — ✅ **branded domain + CPC money-path DONE 2026-07-01** (§5c); **GA npm publish still owner-gated** (`private:true` retained by owner choice → flip + tag when ready). |
+| **D6** | **Branded domain + CPC measurement + GA npm publish.** | Installed clients don't self-update, so GA must ship on the **stable branded URL** and **rotation-safe** (the M0 `keyid` work is its hard prerequisite). Until then the beta installs via `npm i -g github:JaamesBond/LumaLine`. CPC is also gated by upstream OSC-8 bug #26356 (clicks in IDE terminals only today). | **M4 — ✅ DONE 2026-07-01** (§5c): branded domain + CPC money-path + **GA npm publish `lumaline@0.1.0` LIVE** (SLSA provenance). |
 | **D7** | **Scale / ops deferrals:** load-test validation of the ~15k writes/s ceiling, richer IVT heuristics (data-min-safe), advertiser API keys, full dashboards/on-call runbook, DR-at-scale. | Not on the money-honesty critical path; the money-critical alerts (ledger-imbalance, payout-failure, reconciliation) land earlier at M3-T6. | **M6** |
 | **D8** | **M1 — orphaned `open` window** when a revoked device's `window_open` is retried under the sentinel (the client keeps sending its real token, so the sentinel window's beats/close 401 and it never closes). | **Harmless:** `gross=0`, never credits, no double-bill, no crash; the access token expires in ≤15 min and the existing Phase-4 `sweep_stale_windows` cron abandons stale-open rows. | **M4/M6** (optional: signal client demotion in the open reply) |
 | **D9** | **M1 — refresh token has no absolute lifetime + no reuse-detection** (OAuth refresh-rotation BCP). | Bounded by the short **900s** access TTL, 0600 at-rest storage, **manual `device_revoke`**, and the per-window `revoked_at` re-check on the billing path. No payouts until M5. | **M3** (security review): add `devices.refresh_expires_at` + superseded-hash reuse detection → auto-revoke device family |
