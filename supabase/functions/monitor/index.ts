@@ -250,6 +250,10 @@ async function checkBillingReconDrift(fromDate: Date, toDate: Date): Promise<Che
 
   const reconRes = await serviceRpc("billing_recon_totals", { from_ts: fromIso, to_ts: toIso });
   if (!reconRes.ok) return errorCheck(name, `billing_recon_totals HTTP ${reconRes.status}`);
+  // billing_recon_totals RETURNS TABLE (one row) → PostgREST serializes an array, and
+  // serviceRpc unwraps 1-element arrays to the bare row object (billing/index.ts uses
+  // its own svc() helper, which does NOT unwrap — hence rows[0] there). Verified live:
+  // a nonzero DB total reads correctly through this path.
   const dbObj = (reconRes.data as { total_micros?: unknown; entry_count?: unknown }) ?? {};
   const dbTotalMicros = Number(dbObj.total_micros ?? 0);
   const dbCount = Number(dbObj.entry_count ?? 0);
