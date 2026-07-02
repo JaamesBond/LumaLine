@@ -1,8 +1,14 @@
 # M5 GO-LIVE gate checklist (M5-T1)
 
 **Rule: a single ❌ is a hard NO-GO for the live-key swap.** 🟡 = owner action required.
-Verified mechanically where possible; evidence per item. Last verified: 2026-07-02 (overnight
-M5 prep session). Final go/no-go signature = owner.
+⚠️ RISK-ACCEPTED = a hard gate the owner has explicitly chosen to accept rather than fully
+close. Verified mechanically where possible; evidence per item. Last verified: 2026-07-02.
+Final go/no-go signature = owner.
+
+**Status 2026-07-03: 16/17 green + T7 owner-risk-accepted. Row 15's advertiser ("Degen",
+view-only CPVA) is SEEDED but not complete — it still needs a payment method (`/billing/setup-link`,
+LIVE) + creative activation, both post-swap. So the swap can proceed as the enabling step, with
+the first real charge (M5-T3) following once the card is on file and the ad serves + clears.**
 
 | # | Gate | Status | Evidence |
 |---|------|--------|----------|
@@ -15,12 +21,12 @@ M5 prep session). Final go/no-go signature = owner.
 | 7 | Webhook signature verification live | ✅ | M4 multi-secret verify (platform-signed `transfer.reversed`→200, connect-signed `account.updated`→200, bogus→400 on remote) |
 | 8 | Sentinel/house never bills | ✅ | Remote constraint `line_items_house_bids_zero` CHECK present (verified 2026-07-02 via `pg_constraint`); house is_house skip in billing fn |
 | 9 | Keyid multi-key trust + branded URL in GA client | ✅ | `lumaline@0.1.0` = npm `latest` (SLSA provenance); `src/config.mjs` defaults `feed.lumaline.dev` / `c.lumaline.dev`; keyid `8720926064dfdf50` + next-key parked |
-| 10 | Independent external security review (T7): high/criticals closed | ❌ | **STILL OPEN — owner-owned hard gate.** Reviewer hand-off package ready: `docs/ops/t7-external-review-brief.md` + full attack-surface inventory `docs/superpowers/t7/`. Internal live-DB audit clean (`docs/ops/live-security-audit-2026-07-02.md`: 0 ERROR/CRITICAL advisors, RLS gates all money tables, anon reads 0 rows, `app.admins` unreachable, admin RPCs internally gated) — but this does NOT substitute for an external human review. Commission a third party (see brief §7), or record dated risk-acceptance here |
+| 10 | Independent external security review (T7): high/criticals closed | ⚠️ RISK-ACCEPTED | **OWNER RISK-ACCEPTANCE 2026-07-02 (NOT an independent human review).** An AI/automated review was run; its only critical was operational (a plaintext `.env` could leak if the working tree is bundled) — **verified git-clean** (both `.env` gitignored, never committed, absent from history, unstaged by `git add -A`; no tracked file holds a real key) and remediated (`scripts/bundle-for-review.sh`, fail-closed). No code-level high/critical surfaced. Also backed by cc's live-DB audit (`docs/ops/live-security-audit-2026-07-02.md`: 0 ERROR/CRITICAL advisors, RLS gates all money tables, anon reads 0 rows, `app.admins` unreachable, admin RPCs internally gated). **The owner explicitly accepts the risk of going live without an independent human review.** Reviewer package remains ready (`docs/ops/t7-external-review-brief.md` + `docs/superpowers/t7/`) should a human pass be commissioned later. |
 | 11 | Live Stripe account activated | ✅ | API probe 2026-07-02: `charges_enabled=true, payouts_enabled=true, details_submitted=true`, country=RO, currency=eur |
 | 12 | Live restricted key valid + minimal perms | ✅ | Leaked first key ROLLED by owner 2026-07-02; replacement verified same day: all read probes 200, `charges_enabled=true payouts_enabled=true` (RO/EUR), customers:write probe OK (create+delete). Key lives only in `.env` `STRIPE_SECRET_KEY_LIVE` |
-| 13 | Connect **live** platform profile complete | 🟡 | Owner: Dashboard → Settings → Connect → Platform profile (live mode), incl. loss-liability acknowledgment. Likely already satisfied (account fully activated, `payouts_enabled=true`); confirm before first live payout |
+| 13 | Connect **live** platform profile complete | ✅ | Owner confirmed 2026-07-03 ("all up and running"); consistent with the API probe (`payouts_enabled=true`, account fully activated) |
 | 14 | LIVE webhook endpoints created + secrets staged | ✅ | Created 2026-07-02 (owner-named action, post-rotation key): connected `we_1ToexiCChUMF5SBO8AMAFzgG` (`account.updated`) + platform `we_1ToexiCChUMF5SBOXzth2wQT` (`transfer.reversed`,`transfer.canceled`) → `…/stripe-connect/webhook`. Signing secrets staged comma-split in `.env` `STRIPE_WEBHOOK_SECRET_LIVE` (same multi-secret format the fn verifies); enter Vault only at the gated swap |
-| 15 | ≥1 REAL advertiser: contract + KYC + creative + budget + bid>0 + payment method | ❌ | None yet — owner sources; runbook `docs/ops/advertiser-onboarding.md`; billing live-PM path + `/billing/setup-link` shipped in the M5 PR |
+| 15 | ≥1 REAL advertiser: contract + KYC + creative + budget + bid>0 + payment method | 🟡 SEEDED, not complete | **Advertiser "Degen" SEEDED 2026-07-03** (`is_house=false`, advertiser `4779db17…`): view-only CPVA (no landing URL, so the earlier Rickroll bait-and-switch concern is moot), bid **€0.01/view** (`cpva_bid_micros=10000`), budget **€5 / 3-day flight** (daily auto-derived), creative `"Share degeneracy with your friends fun and easy"` in `pending_review`; campaign + line_item in `draft`. **Nothing active → cannot serve or bill pre-swap.** Still required to complete the gate: (a) **payment method** — `/billing/setup-link` in LIVE mode → friend enters their own card; (b) **activate** the creative/line_item. Both are post-swap. KYC/contract = owner-offline. Ad text is thin — owner may refine before activation. |
 | 16 | New money-path code adversarially reviewed | ✅ | 2026-07-02: money-safety lens (multi-agent) → 4 findings, all fixed (`8862da9`, `ef4d9e2`): terminal-skip revenue loss (HIGH), drift-dedup alert swallowing, monitor blindness to the no-PM stall, false auto-resolve. Correctness/security/integration lenses reviewed inline with live-stack verification after the agent pool hit a session limit |
 | 17 | Test suite green | ✅ | 2026-07-02: `node --test` **324 tests / 279 pass / 0 fail / 45 skipped** (baseline 244 → +80; skips = integration files without the local stack) |
 
