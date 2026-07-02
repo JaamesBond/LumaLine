@@ -5,8 +5,9 @@
 close. Verified mechanically where possible; evidence per item. Last verified: 2026-07-02.
 Final go/no-go signature = owner.
 
-**Status 2026-07-02: 16/17 green + 1 owner-risk-accepted (T7). Remaining before swap:
-row 13 (Connect live platform-profile confirm) + row 15 (first real advertiser).**
+**Status 2026-07-03: 16/17 green + T7 owner-risk-accepted. The ONE remaining gate before the
+swap is row 15 — a first real advertiser with a policy-compliant creative (the Rickroll
+candidate was rejected at creative review).**
 
 | # | Gate | Status | Evidence |
 |---|------|--------|----------|
@@ -22,9 +23,9 @@ row 13 (Connect live platform-profile confirm) + row 15 (first real advertiser).
 | 10 | Independent external security review (T7): high/criticals closed | ⚠️ RISK-ACCEPTED | **OWNER RISK-ACCEPTANCE 2026-07-02 (NOT an independent human review).** An AI/automated review was run; its only critical was operational (a plaintext `.env` could leak if the working tree is bundled) — **verified git-clean** (both `.env` gitignored, never committed, absent from history, unstaged by `git add -A`; no tracked file holds a real key) and remediated (`scripts/bundle-for-review.sh`, fail-closed). No code-level high/critical surfaced. Also backed by cc's live-DB audit (`docs/ops/live-security-audit-2026-07-02.md`: 0 ERROR/CRITICAL advisors, RLS gates all money tables, anon reads 0 rows, `app.admins` unreachable, admin RPCs internally gated). **The owner explicitly accepts the risk of going live without an independent human review.** Reviewer package remains ready (`docs/ops/t7-external-review-brief.md` + `docs/superpowers/t7/`) should a human pass be commissioned later. |
 | 11 | Live Stripe account activated | ✅ | API probe 2026-07-02: `charges_enabled=true, payouts_enabled=true, details_submitted=true`, country=RO, currency=eur |
 | 12 | Live restricted key valid + minimal perms | ✅ | Leaked first key ROLLED by owner 2026-07-02; replacement verified same day: all read probes 200, `charges_enabled=true payouts_enabled=true` (RO/EUR), customers:write probe OK (create+delete). Key lives only in `.env` `STRIPE_SECRET_KEY_LIVE` |
-| 13 | Connect **live** platform profile complete | 🟡 | Owner: Dashboard → Settings → Connect → Platform profile (live mode), incl. loss-liability acknowledgment. Likely already satisfied (account fully activated, `payouts_enabled=true`); confirm before first live payout |
+| 13 | Connect **live** platform profile complete | ✅ | Owner confirmed 2026-07-03 ("all up and running"); consistent with the API probe (`payouts_enabled=true`, account fully activated) |
 | 14 | LIVE webhook endpoints created + secrets staged | ✅ | Created 2026-07-02 (owner-named action, post-rotation key): connected `we_1ToexiCChUMF5SBO8AMAFzgG` (`account.updated`) + platform `we_1ToexiCChUMF5SBOXzth2wQT` (`transfer.reversed`,`transfer.canceled`) → `…/stripe-connect/webhook`. Signing secrets staged comma-split in `.env` `STRIPE_WEBHOOK_SECRET_LIVE` (same multi-secret format the fn verifies); enter Vault only at the gated swap |
-| 15 | ≥1 REAL advertiser: contract + KYC + creative + budget + bid>0 + payment method | ❌ | None yet — owner sources; runbook `docs/ops/advertiser-onboarding.md`; billing live-PM path + `/billing/setup-link` shipped in the M5 PR |
+| 15 | ≥1 REAL advertiser: contract + KYC + creative + budget + bid>0 + payment method | ❌ | **In progress.** First candidate ("Degen", €5/3 days) **rejected 2026-07-03 at creative review** — landing URL was a Rickroll = bait-and-switch under Ad Policy §4 (verified via page fetch). Owner (admin approver) chose to obtain a compliant creative instead. Awaiting: real ad text + matching landing + bid (CPVA recommended — views work in all terminals; CPC only IDE terminals per #26356). Then seed via `docs/ops/advertiser-onboarding.md`, card via `/billing/setup-link` post-swap. **This is the last open gate before the swap.** |
 | 16 | New money-path code adversarially reviewed | ✅ | 2026-07-02: money-safety lens (multi-agent) → 4 findings, all fixed (`8862da9`, `ef4d9e2`): terminal-skip revenue loss (HIGH), drift-dedup alert swallowing, monitor blindness to the no-PM stall, false auto-resolve. Correctness/security/integration lenses reviewed inline with live-stack verification after the agent pool hit a session limit |
 | 17 | Test suite green | ✅ | 2026-07-02: `node --test` **324 tests / 279 pass / 0 fail / 45 skipped** (baseline 244 → +80; skips = integration files without the local stack) |
 
