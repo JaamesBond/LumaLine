@@ -9,6 +9,9 @@ poc/live/settings.statusline-backup.json
 supabase/.temp/
 supabase/.branches/
 
+# Local MCP config carries a live Supabase PAT — never commit it.
+.mcp.json
+
 # Internal-only docs — kept locally, never published (AI run playbook/log, triage notes,
 # raw design specs, unposted GTM drafts). Removed from public history on 2026-06-27.
 docs/LAUNCH_RUN_PROMPT.md
