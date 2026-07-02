@@ -50,9 +50,16 @@ export async function step({ state, now, activity, post, cfg }) {
     let ad;
     try { ad = JSON.parse(w.adData); } catch { return refuse(); }
     if (ad.windowId !== w.windowId) return refuse();        // ad must be bound to this window
+    // Start the dwell clock AFTER the open round-trip. The server stamps ad_windows.started_at at
+    // the open TRANSACTION time (post round-trip + sentinel-JWT mint + ad signing), so measuring the
+    // dwell from `now` (captured before the round-trip) made the server see a dwell ~network-latency
+    // short of dwellMs and reject a full honest dwell as 'dwell too short'. Re-sampling here aligns
+    // the client's dwell start with the server's. cfg.clock is injected (Date.now in prod, a fake in
+    // tests); fall back to `now` when absent so the pure-clock tests stay deterministic.
+    const startedAt = cfg.clock ? cfg.clock() : now;
     state = {
       windowId: w.windowId, challenge: w.challenge, seq: 0, prevHash: w.windowId,
-      startedAt: now, dwellMs: w.dwellMs, hbIntervalMs: w.hbIntervalMs,
+      startedAt, dwellMs: w.dwellMs, hbIntervalMs: w.hbIntervalMs,
       line: ad.line, label: ad.label ?? 'sponsored', clickUrl: ad.clickUrl,
       reported: false, lastActivityValue: activity,
     };
