@@ -17,9 +17,11 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHmac } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 
 const BASE = 'http://127.0.0.1:54321/rest/v1';
+const DB_URL = 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
 const ANON =
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0';
 const SERVICE =
@@ -98,6 +100,24 @@ async function svcSelect(path) {
   return JSON.parse(text);
 }
 
+async function svcWrite(method, path, body) {
+  const res = await fetch(`${BASE}/${path}`, {
+    method,
+    headers: { apikey: SERVICE, Authorization: `Bearer ${SERVICE}`, 'content-type': 'application/json', Prefer: 'return=minimal' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${method} ${path} -> HTTP ${res.status}: ${await res.text()}`);
+}
+
+// Direct psql access — needed ONLY for auth.users (config.toml exposes just
+// public/graphql_public via PostgREST, so REST cannot see the auth schema). B1 needs it
+// to create a dedicated publisher's backing auth.users row. Mirrors the pattern used in
+// payout-rails.integration.mjs / gdpr-deletion.integration.mjs.
+function psql(sql) {
+  return execFileSync('psql', [DB_URL, '-tAqc', sql], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+}
+function psqlWorks() { try { return psql('select 1') === '1'; } catch { return false; } }
+
 // Execute arbitrary SQL via service_role (used to read counters / set up edge cases).
 async function svcSql(query) {
   const res = await fetch(`${BASE}/../rest/v1/rpc/exec_sql`, {
@@ -156,6 +176,12 @@ if (UP && !SENTINEL_SEEDED) {
     `[serving.integration] Sentinel publisher not in dev seed — T1/T7 will SKIP. ` +
       `Apply supabase/seed.prod.sql to test sentinel gate against a live stack.`,
   );
+}
+
+// B1 needs psql to seed a dedicated publisher's backing auth.users row (see psql() above).
+const PSQL_OK = UP ? psqlWorks() : false;
+if (UP && !PSQL_OK) {
+  console.log(`[serving.integration] psql unavailable — B1 will SKIP.`);
 }
 
 // ---------------------------------------------------------------------------
@@ -331,4 +357,118 @@ test('T7 — sentinel window credits with gross=0 (honest billing invariant)', {
   // The sentinel creative has cpva=0, so gross is always 0.
   assert.equal(res.credited, true, `sentinel window should credit (gross=0 is still credited)`);
   assert.equal(res.gross_micros, 0, 'sentinel window MUST credit with gross=0 (honest billing)');
+});
+
+// ---------------------------------------------------------------------------
+// B1: cumulative total-budget cap counts only VALID impressions — a line item is
+// suppressed once lifetime spend (sum of provisional+cleared impressions.gross_micros)
+// reaches budget_total_micros, but a clawed_back impression of the same amount does NOT
+// count (20260702120000_true_total_budget_cap.sql sums public.impressions in billable
+// states; clawbacks are excluded on purpose so a reversed flight regains its budget).
+//
+// Uses a DEDICATED advertiser->campaign->line_item->creative AND a DEDICATED
+// publisher+device (fresh rows), so this test can never mutate the SHARED seed line item
+// (SEEDED_LINE_ITEM_ID) or any other publisher's counters — the total-budget guard has NO
+// publisher filter, so the old B1 (which PATCHed the shared line item + shared
+// line_item_daily_stats) could starve concurrent test files of paid/house fills. This
+// version seeds public.impressions directly (the guard's actual source), never
+// line_item_daily_stats (which the new guard no longer reads).
+// ---------------------------------------------------------------------------
+test('B1 — cumulative total budget cap counts only valid impressions (clawbacks excluded)', {
+  skip: !UP ? `PostgREST unreachable at ${BASE}`
+    : !PSQL_OK ? 'psql unavailable (needed to seed a dedicated publisher\'s auth.users row)'
+    : false,
+}, async () => {
+  const BUDGET_TOTAL = 3_000_000;
+  const UNIQUE_LINE = `B1-dedicated-budget-cap-${randomUUID()}`;
+  // High weight (1000) vs the seeded competitor's weight (1, per seed.sql) makes both the
+  // "excluded" and "eligible" outcomes below effectively deterministic over N calls.
+  const N = 25;
+
+  const authId       = randomUUID();
+  const pubId        = randomUUID();
+  const deviceId     = randomUUID();
+  const advertiserId = randomUUID();
+  const campaignId   = randomUUID();
+  const lineItemId   = randomUUID();
+  const creativeId   = randomUUID();
+  const impressionId = randomUUID();
+
+  const jwt = mintDeviceJwt({ sub: authId, publisher_id: pubId, device_id: deviceId });
+
+  async function servedLines() {
+    const lines = [];
+    for (let i = 0; i < N; i++) {
+      const win = await rpc('window_open', { p_activity_snapshot: 'session' }, { jwt });
+      lines.push(win.ad && win.ad.line ? win.ad.line : null);
+    }
+    return lines;
+  }
+
+  try {
+    // ---- Arrange: dedicated auth user + publisher + device (shapes mirror seed.sql) ----
+    psql(`insert into auth.users (instance_id, id, aud, role, email, encrypted_password,
+        email_confirmed_at, raw_app_meta_data, raw_user_meta_data, created_at, updated_at,
+        confirmation_token, recovery_token, email_change_token_new, email_change)
+      values ('00000000-0000-0000-0000-000000000000','${authId}','authenticated','authenticated',
+        'b1-${authId}@example.com','',now(),'{"provider":"email","providers":["email"]}','{}',
+        now(),now(),'','','','');`);
+
+    await svcWrite('POST', 'publishers',
+      [{ id: pubId, auth_user_id: authId, handle: `b1-${pubId.slice(0, 8)}`, country: 'US', status: 'active' }]);
+    await svcWrite('POST', 'devices',
+      [{ id: deviceId, publisher_id: pubId, label: 'B1 dedicated device', client_version: '0.1.0', attested: true, revoked_at: null }]);
+
+    // ---- Arrange: dedicated demand chain — small total budget, high weight, global targeting ----
+    await svcWrite('POST', 'advertisers', [{ id: advertiserId, name: 'B1 dedicated advertiser', status: 'active' }]);
+    await svcWrite('POST', 'campaigns', [{ id: campaignId, advertiser_id: advertiserId, name: 'B1 dedicated campaign', status: 'active' }]);
+    await svcWrite('POST', 'line_items', [{
+      id: lineItemId, campaign_id: campaignId,
+      cpva_bid_micros: 1000, cpc_bid_micros: 0, weight: 1000,
+      budget_total_micros: BUDGET_TOTAL, budget_daily_micros: null,
+      targeting: {}, status: 'active',
+      start_at: new Date(Date.now() - 3600_000).toISOString(),
+      end_at: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+    }]);
+    await svcWrite('POST', 'creatives', [{
+      id: creativeId, line_item_id: lineItemId, line: UNIQUE_LINE,
+      dest_url: null, label: 'sponsored', status: 'active',
+    }]);
+
+    // ---- Capped case: one CLEARED impression at exactly budget_total -> excluded ----
+    await svcWrite('POST', 'impressions', [{
+      id: impressionId, window_id: randomUUID(), publisher_id: pubId,
+      line_item_id: lineItemId, creative_id: creativeId,
+      gross_micros: BUDGET_TOTAL, state: 'cleared',
+    }]);
+
+    const cappedLines = await servedLines();
+    assert.ok(!cappedLines.includes(UNIQUE_LINE),
+      'dedicated line item must NOT be served once valid (cleared) spend >= budget_total_micros');
+    // Positive control: the publisher CAN still get a paid ad (the seeded item) over the
+    // same N calls — proves the absence above is the budget cap, not a dead/no-fill stack.
+    assert.ok(cappedLines.some((l) => l !== null && l !== UNIQUE_LINE),
+      'some OTHER paid creative must still serve — proves absence above is the cap, not a dead stack');
+
+    // ---- Clawback case: same amount, but clawed_back -> must NOT count against budget ----
+    await svcWrite('PATCH', `impressions?id=eq.${impressionId}`, { state: 'clawed_back' });
+
+    const clawbackLines = await servedLines();
+    assert.ok(clawbackLines.includes(UNIQUE_LINE),
+      'dedicated line item MUST be eligible again once its only spend is clawed_back (excluded from the guard)');
+  } finally {
+    // ---- Cleanup: best-effort, FK-safe order (children before parents); never touches
+    // the shared seed (SEEDED_LINE_ITEM_ID / PUB_A are never referenced above). ----
+    try { await svcWrite('DELETE', `impressions?line_item_id=eq.${lineItemId}`, {}); } catch { /* best-effort */ }
+    try { await svcWrite('DELETE', `ad_windows?publisher_id=eq.${pubId}`, {}); } catch { /* best-effort */ }
+    try { await svcWrite('DELETE', `serve_counters?publisher_id=eq.${pubId}`, {}); } catch { /* best-effort */ }
+    try { await svcWrite('DELETE', `line_item_daily_stats?line_item_id=eq.${lineItemId}`, {}); } catch { /* best-effort */ }
+    try { await svcWrite('DELETE', `creatives?id=eq.${creativeId}`, {}); } catch { /* best-effort */ }
+    try { await svcWrite('DELETE', `line_items?id=eq.${lineItemId}`, {}); } catch { /* best-effort */ }
+    try { await svcWrite('DELETE', `campaigns?id=eq.${campaignId}`, {}); } catch { /* best-effort */ }
+    try { await svcWrite('DELETE', `advertisers?id=eq.${advertiserId}`, {}); } catch { /* best-effort */ }
+    try { await svcWrite('DELETE', `devices?id=eq.${deviceId}`, {}); } catch { /* best-effort */ }
+    try { await svcWrite('DELETE', `publishers?id=eq.${pubId}`, {}); } catch { /* best-effort */ }
+    try { psql(`delete from auth.users where id='${authId}';`); } catch { /* best-effort */ }
+  }
 });
