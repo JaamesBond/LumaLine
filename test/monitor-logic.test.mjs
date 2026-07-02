@@ -31,6 +31,7 @@ import {
   RECON_WINDOW_DAYS,
   buildAlertEmail,
   errorCheck,
+  evalBillingStalled,
   evalChargeFailed,
   evalLedgerZeroSum,
   evalPayoutFailed,
@@ -242,11 +243,32 @@ test('ML24: 1-micro drift fires critical with both totals in the payload', () =>
   assert.equal(r.status, 'fail');
   const a = r.alerts[0];
   assert.equal(a.severity, 'critical');
-  assert.equal(a.dedup_key, 'drift');
+  assert.equal(a.dedup_key, 'drift:+0'); // magnitude bucket: |1| micro → 10^0
   assert.equal(a.payload.db_total_micros, 500001);
   assert.equal(a.payload.stripe_total_micros, 500000);
   assert.equal(a.payload.discrepancy_micros, 1);
   assert.equal(a.payload.db_count, 1);
+});
+
+test('ML24b: dedup key buckets by magnitude — a 1000× larger NEW drift lands in a new bucket (fires; not swallowed by the open small-drift alert)', () => {
+  const small = evalReconDrift('billing_recon_drift', 300000, 0);        // €0.30 structural
+  const big = evalReconDrift('billing_recon_drift', 500300000, 0);       // + €500 real bug
+  assert.equal(small.alerts[0].dedup_key, 'drift:+5');
+  assert.equal(big.alerts[0].dedup_key, 'drift:+8');
+  assert.notEqual(small.alerts[0].dedup_key, big.alerts[0].dedup_key);
+});
+
+test('ML24c: dedup key carries the drift sign — DB-ahead vs Stripe-ahead are distinct alerts', () => {
+  const over = evalReconDrift('payout_recon_drift', 10000, 0);
+  const under = evalReconDrift('payout_recon_drift', 0, 10000);
+  assert.equal(over.alerts[0].dedup_key, 'drift:+4');
+  assert.equal(under.alerts[0].dedup_key, 'drift:-4');
+});
+
+test('ML24d: within-bucket growth keeps the same dedup key (no re-fire below 10×)', () => {
+  const a = evalReconDrift('billing_recon_drift', 200000, 0);
+  const b = evalReconDrift('billing_recon_drift', 900000, 0);
+  assert.equal(a.alerts[0].dedup_key, b.alerts[0].dedup_key);
 });
 
 test('ML25: sub-cent floor drift — DB 50.5 cents in micros vs Stripe 50 whole cents fires with drift 5000', () => {
@@ -319,10 +341,10 @@ test('ML32: resolvableCheckNames includes pass+fail, excludes error (an unobserv
   assert.deepEqual(names, ['ledger_zero_sum', 'payout_stuck']);
 });
 
-test('ML33: CHECK_NAMES covers all six T6 checks', () => {
+test('ML33: CHECK_NAMES covers all seven T6 checks', () => {
   assert.deepEqual(CHECK_NAMES, [
     'ledger_zero_sum', 'payout_stuck', 'payout_failed',
-    'charge_failed', 'billing_recon_drift', 'payout_recon_drift',
+    'charge_failed', 'billing_stalled', 'billing_recon_drift', 'payout_recon_drift',
   ]);
 });
 
@@ -398,4 +420,68 @@ test('ML42: empty or missing values NEVER authorize (unset env must not match em
 
 test('ML43: unicode-equal strings compare true (digest over UTF-8 bytes)', async () => {
   assert.equal(await timingSafeEqualStrings('sécret✓', 'sécret✓'), true);
+});
+
+// ---------------------------------------------------------------------------
+// billing_stalled (stateful: paused line items + uncharged cleared debt)
+// ---------------------------------------------------------------------------
+
+test('ML44: advertiser with paused items AND uncharged debt fires HIGH, keyed adv:<id>, debt summed', () => {
+  const r = evalBillingStalled({
+    unchargedRows: [
+      { advertiser_id: 'a1', advertiser_name: 'Acme', amount_micros: 300000 },
+      { advertiser_id: 'a1', advertiser_name: 'Acme', amount_micros: '700000' }, // string bigint
+    ],
+    pausedLineItems: [
+      { id: 'li1', advertiser_id: 'a1' },
+      { id: 'li2', advertiser_id: 'a1' },
+    ],
+  });
+  assert.equal(r.status, 'fail');
+  assert.equal(r.alerts.length, 1);
+  const a = r.alerts[0];
+  assert.equal(a.severity, 'high');
+  assert.equal(a.dedup_key, 'adv:a1');
+  assert.equal(a.payload.paused_line_items, 2);
+  assert.equal(a.payload.uncharged_groups, 2);
+  assert.equal(a.payload.uncharged_micros, 1000000);
+});
+
+test('ML45: uncharged debt with NO paused items does not fire (billing will charge it next run)', () => {
+  const r = evalBillingStalled({
+    unchargedRows: [{ advertiser_id: 'a1', amount_micros: 500000 }],
+    pausedLineItems: [],
+  });
+  assert.equal(r.status, 'pass');
+});
+
+test('ML46: paused items with NO uncharged debt does not fire (manual pause of a healthy advertiser)', () => {
+  const r = evalBillingStalled({
+    unchargedRows: [],
+    pausedLineItems: [{ id: 'li1', advertiser_id: 'a1' }],
+  });
+  assert.equal(r.status, 'pass');
+});
+
+test('ML47: independent advertisers alert independently; unreadable micros still counts the group', () => {
+  const r = evalBillingStalled({
+    unchargedRows: [
+      { advertiser_id: 'a1', amount_micros: 100000 },
+      { advertiser_id: 'a2', amount_micros: 'garbage' }, // unreadable: group counted, sum omits it
+      { advertiser_id: 'a3', amount_micros: 100000 },    // a3 has no paused items → no alert
+    ],
+    pausedLineItems: [
+      { id: 'li1', advertiser_id: 'a1' },
+      { id: 'li2', advertiser_id: 'a2' },
+    ],
+  });
+  assert.equal(r.status, 'fail');
+  assert.equal(r.alerts.length, 2);
+  const a2 = r.alerts.find((a) => a.dedup_key === 'adv:a2');
+  assert.equal(a2.payload.uncharged_groups, 1);
+  assert.equal(a2.payload.uncharged_micros, 0);
+});
+
+test('ML48: billing_stalled is in CHECK_NAMES (deployable check set)', () => {
+  assert.ok(CHECK_NAMES.includes('billing_stalled'));
 });
