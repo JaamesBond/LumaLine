@@ -222,6 +222,22 @@ Deno.serve(async (req) => {
                      "start_at", "end_at", "targeting"]) {
       if (body[k] !== undefined) row[k] = body[k];
     }
+
+    // Derive the daily budget from the flight when the operator gives a total + dates but
+    // no explicit daily cap ("spend €X over Y days"). Even pacing then spreads the total
+    // across the flight; the cumulative total cap (migration 20260702120000) stops it at the
+    // total. An explicitly-provided budget_daily_micros is respected as-is.
+    if (row.budget_daily_micros === undefined &&
+        typeof row.budget_total_micros === "number" &&
+        typeof row.start_at === "string" && typeof row.end_at === "string") {
+      const startMs = Date.parse(row.start_at);
+      const endMs = Date.parse(row.end_at);
+      if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
+        const flightDays = Math.max(1, Math.ceil((endMs - startMs) / 86_400_000));
+        row.budget_daily_micros = Math.ceil((row.budget_total_micros as number) / flightDays);
+      }
+    }
+
     const res = await svc("POST", "line_items", {
       body: row,
       prefer: "return=representation",
