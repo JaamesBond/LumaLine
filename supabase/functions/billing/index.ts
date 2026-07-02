@@ -5,6 +5,8 @@
 // Endpoints:
 //   POST /functions/v1/billing/charge              — run billing cycle (admin-only)
 //   POST /functions/v1/billing/charge?dry_run=true — preview plan, no Stripe calls
+//   POST /functions/v1/billing/setup-link          — Stripe Checkout setup-mode link so an
+//                                                    advertiser can save a card (admin-only)
 //
 // ADMIN AUTH: same pattern as admin-booking — forwardRpc('admin_check') forwards the
 // caller's bearer to PostgREST, which verifies the JWT and calls admin_check() →
@@ -17,10 +19,16 @@
 //      a. Skip house/sentinel advertisers (is_house=true) → status='skipped'.
 //      b. Skip below Stripe minimum ($0.50 = 50 cents) → status='skipped'.
 //      c. Get or create Stripe customer (persist stripe_customer_id on advertiser).
-//      d. Create+confirm PaymentIntent (test mode: pm_card_visa).
+//      d. Resolve the payment method via choosePaymentMethod (_shared/billing-logic.mjs):
+//         saved default PM > first attached card > pm_card_visa (TEST MODE ONLY).
+//         Live mode with no saved PM → the group is reported skipped (reason=
+//         no_payment_method) and the advertiser's line_items are paused, but NO
+//         advertiser_charges row is written — the group stays in the uncharged view
+//         and is charged by a later run once a PM is saved (retryable, not terminal).
+//      e. Create+confirm PaymentIntent with the resolved payment method.
 //         Idempotency key: lumaline_grp_{entry_group_id} — safe to re-run.
-//      e. Insert into advertiser_charges (UNIQUE on entry_group_id = idempotency backstop).
-//      f. On card_declined: pause all line_items for this advertiser.
+//      f. Insert into advertiser_charges (UNIQUE on entry_group_id = idempotency backstop).
+//      g. On card_declined: pause all line_items for this advertiser.
 //
 // TRUST INVARIANTS (non-negotiable):
 //   1. House/sentinel (is_house=true) → always skipped. Never charged.
@@ -40,6 +48,7 @@ import {
   SERVICE_ROLE_KEY,
 } from "../_shared/jwt.ts";
 import Stripe from "https://esm.sh/stripe@14.21.0?target=deno";
+import { choosePaymentMethod, isLiveKey } from "../_shared/billing-logic.mjs";
 
 const billingCors = {
   ...corsHeaders,
@@ -117,6 +126,81 @@ function getStripe(): Stripe {
     httpClient: Stripe.createFetchHttpClient(),
   });
   return _stripe;
+}
+
+// True when the configured Stripe key is a LIVE key (sk_live_/rk_live_). Drives the
+// choosePaymentMethod live-mode guard: the pm_card_visa test fallback only engages for
+// non-live keys. Reads the env (never logs the value).
+function stripeIsLive(): boolean {
+  return isLiveKey(Deno.env.get("STRIPE_SECRET_KEY") ?? "");
+}
+
+// Get-or-create the Stripe customer for an advertiser, persisting stripe_customer_id on
+// the advertisers row so future calls skip the create. Shared by the /charge loop and
+// the /setup-link endpoint.
+async function getOrCreateStripeCustomer(
+  stripe: Stripe,
+  advertiserId: string,
+  advertiserName: string,
+  existingCustomerId: string | null,
+): Promise<string> {
+  if (existingCustomerId) return existingCustomerId;
+  const customer = await stripe.customers.create({
+    name:     advertiserName,
+    metadata: { advertiser_id: advertiserId },
+  });
+  await svc("PATCH", "advertisers", {
+    body:   { stripe_customer_id: customer.id },
+    query:  `id=eq.${advertiserId}`,
+    prefer: "return=minimal",
+  });
+  return customer.id;
+}
+
+// Pause every active/draft line_item for an advertiser (no credit extension without a
+// working payment method). Shared by the card_declined path and the live-mode
+// no_payment_method skip path — identical semantics for both.
+async function pauseAdvertiserLineItems(advertiserId: string): Promise<void> {
+  const campsRes = await svc("GET", "campaigns", {
+    query: `advertiser_id=eq.${advertiserId}&select=id`,
+  });
+  if (campsRes.ok && Array.isArray(campsRes.data) && campsRes.data.length > 0) {
+    const ids = (campsRes.data as Array<{ id: string }>).map((r) => r.id).join(",");
+    await svc("PATCH", "line_items", {
+      body:   { status: "paused" },
+      query:  `campaign_id=in.(${ids})&status=in.(active,draft)`,
+      prefer: "return=minimal",
+    });
+  }
+}
+
+// Resolve the payment method to charge for a Stripe customer: fetch the customer with
+// invoice_settings.default_payment_method expanded, list attached card payment methods,
+// and delegate the decision to the pure choosePaymentMethod (_shared/billing-logic.mjs).
+// Card-only today: SEPA debit confirms asynchronously (can fail days later), which would
+// break the synchronous succeeded/failed recording + /reconcile assumptions.
+async function resolvePaymentMethod(
+  stripe: Stripe,
+  customerId: string,
+): Promise<{ pm: string } | { skip: "no_payment_method" }> {
+  const customer = await stripe.customers.retrieve(customerId, {
+    expand: ["invoice_settings.default_payment_method"],
+  });
+  let defaultPmId: string | null = null;
+  if (!("deleted" in customer && customer.deleted)) {
+    const dpm = (customer as Stripe.Customer).invoice_settings?.default_payment_method;
+    defaultPmId = typeof dpm === "string" ? dpm : dpm?.id ?? null;
+  }
+  const attached = await stripe.paymentMethods.list({
+    customer: customerId,
+    type:     "card",
+    limit:    100,
+  });
+  return choosePaymentMethod({
+    liveMode:                 stripeIsLive(),
+    defaultPaymentMethodId:   defaultPmId,
+    attachedPaymentMethodIds: attached.data.map((pm) => pm.id),
+  });
 }
 
 // Convert micro-EUR to Stripe cents (LumaLine operates in EUR — RO/EUR Stripe entity).
@@ -285,19 +369,36 @@ Deno.serve(async (req) => {
       try {
         const stripe = getStripe();
 
-        // Get or create a Stripe customer for this advertiser.
-        if (!customerId) {
-          const customer = await stripe.customers.create({
-            name:     entry.advertiser_name,
-            metadata: { advertiser_id: entry.advertiser_id },
+        // Get or create a Stripe customer for this advertiser (persists the id).
+        customerId = await getOrCreateStripeCustomer(
+          stripe, entry.advertiser_id, entry.advertiser_name, customerId,
+        );
+
+        // Resolve the payment method: saved default > first attached card >
+        // pm_card_visa (TEST MODE ONLY — the pure helper guarantees live mode can
+        // never fall through to the test token).
+        const pmChoice = await resolvePaymentMethod(stripe, customerId);
+        if ("skip" in pmChoice) {
+          // Live mode, no saved payment method: pause the advertiser's line_items
+          // exactly like the card_declined path (no credit extension without a PM)
+          // and move on. Deliberately NO advertiser_charges row: the uncharged view
+          // excludes any group with a charges row regardless of status
+          // (ac.entry_group_id IS NULL), so inserting a 'skipped' row here would make
+          // the group PERMANENTLY unbillable — the publisher earning leg would stand
+          // while the advertiser is never charged. Leaving the group in the view means
+          // a later run charges it once the advertiser saves a PM via /setup-link.
+          // (below_stripe_minimum keeps its terminal skip-row: amounts can only be
+          // charged as a group and a sub-minimum group stays sub-minimum forever.)
+          await pauseAdvertiserLineItems(entry.advertiser_id);
+          results.push({
+            entry_group_id: entry.entry_group_id,
+            advertiser_id:  entry.advertiser_id,
+            status:         "skipped",
+            reason:         "no_payment_method",
+            amount_micros:  entry.amount_micros,
+            amount_cents:   amountCents,
           });
-          customerId = customer.id;
-          // Persist the customer ID so future charges skip the create step.
-          await svc("PATCH", "advertisers", {
-            body:   { stripe_customer_id: customerId },
-            query:  `id=eq.${entry.advertiser_id}`,
-            prefer: "return=minimal",
-          });
+          continue;
         }
 
         // Create and confirm PaymentIntent.
@@ -307,7 +408,7 @@ Deno.serve(async (req) => {
             amount:         amountCents,
             currency:       "eur",
             customer:       customerId,
-            payment_method: "pm_card_visa",  // test mode only
+            payment_method: pmChoice.pm,
             confirm:        true,
             off_session:    true,
             description:    `LumaLine impression ${entry.impression_id}`,
@@ -372,17 +473,7 @@ Deno.serve(async (req) => {
 
         // Pause all line_items for this advertiser on card decline.
         if (isDecline) {
-          const campsRes = await svc("GET", "campaigns", {
-            query: `advertiser_id=eq.${entry.advertiser_id}&select=id`,
-          });
-          if (campsRes.ok && Array.isArray(campsRes.data) && campsRes.data.length > 0) {
-            const ids = (campsRes.data as Array<{ id: string }>).map((r) => r.id).join(",");
-            await svc("PATCH", "line_items", {
-              body:   { status: "paused" },
-              query:  `campaign_id=in.(${ids})&status=in.(active,draft)`,
-              prefer: "return=minimal",
-            });
-          }
+          await pauseAdvertiserLineItems(entry.advertiser_id);
         }
       }
     }
@@ -602,6 +693,70 @@ Deno.serve(async (req) => {
       amount_cents: amountCents,
       impression_id: impressionId,
     });
+  }
+
+  // ---- POST /setup-link -----------------------------------------------------
+  // Admin-only: create a Stripe Checkout Session in SETUP mode so an advertiser can
+  // save a card for future off-session billing. Body: { advertiser_id }.
+  //
+  // NOTE: Checkout setup mode ATTACHES the resulting payment method to the customer,
+  // so choosePaymentMethod's first-attached branch finds it on the very next billing
+  // run — no webhook handling is needed to close the loop. (Setting it as the
+  // invoice_settings default is optional polish; first-attached already suffices.)
+  if (req.method === "POST" && path.endsWith("/setup-link")) {
+    let setupBody: Record<string, unknown> = {};
+    try { setupBody = await req.json(); } catch { /* empty body ok */ }
+
+    const advertiserId = String(setupBody.advertiser_id ?? "").trim();
+    if (!advertiserId) return jsonErr("advertiser_id is required", 400);
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(advertiserId)) {
+      return jsonErr("advertiser_id must be a valid UUID", 400);
+    }
+
+    // Fetch the advertiser (need name + any existing stripe_customer_id).
+    const advRes = await svc("GET", "advertisers", {
+      query: `id=eq.${advertiserId}&select=id,name,stripe_customer_id&limit=1`,
+    });
+    if (!advRes.ok) {
+      return jsonErr("Failed to fetch advertiser", advRes.status, advRes.data);
+    }
+    const advRows = advRes.data as Array<Record<string, unknown>>;
+    if (!Array.isArray(advRows) || advRows.length === 0) {
+      return jsonErr("Advertiser not found", 404);
+    }
+    const advertiser = advRows[0];
+
+    let stripe: Stripe;
+    try {
+      stripe = getStripe();
+    } catch (err: unknown) {
+      const msg = (err as { message?: string }).message ?? "Stripe not configured";
+      return jsonErr(msg, 503);
+    }
+
+    try {
+      // Reuse the same get-or-create helper as the /charge loop (persists the id).
+      const customerId = await getOrCreateStripeCustomer(
+        stripe,
+        advertiserId,
+        String(advertiser.name ?? ""),
+        (advertiser.stripe_customer_id as string | null) ?? null,
+      );
+
+      const session = await stripe.checkout.sessions.create({
+        mode:                 "setup",
+        customer:             customerId,
+        payment_method_types: ["card"],
+        success_url:          "https://lumaline.dev/?billing-setup=success",
+        cancel_url:           "https://lumaline.dev/?billing-setup=cancelled",
+        metadata:             { source: "lumaline", advertiser_id: advertiserId },
+      });
+
+      return jsonOk({ url: session.url, session_id: session.id });
+    } catch (err: unknown) {
+      const msg = (err as { message?: string }).message ?? "Stripe setup session failed";
+      return jsonErr(`Stripe error: ${msg}`, 502);
+    }
   }
 
   return jsonErr("Not found", 404);

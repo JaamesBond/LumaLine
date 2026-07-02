@@ -439,6 +439,15 @@ verify_jwt = false
 [functions.stripe-connect]
 verify_jwt = false
 
+# monitor — money-path monitoring (M3-T6). verify_jwt=false because the function manages
+# auth itself: EITHER the x-lumaline-cron-secret header (pg_cron via app.run_monitor(),
+# constant-time compare against env LUMALINE_CRON_SECRET — no Supabase JWT on that path)
+# OR an admin bearer via forwardRpc('admin_check'), same pattern as billing/admin-booking.
+# READ-ONLY on money tables; writes only app.alert_events. Env: LUMALINE_CRON_SECRET,
+# RESEND_API_KEY, LUMALINE_ALERT_EMAIL, STRIPE_SECRET_KEY (recon checks).
+[functions.monitor]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327
