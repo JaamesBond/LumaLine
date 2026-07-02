@@ -48,7 +48,7 @@ function tick(tokens, sessionId) {
 test('shows the sponsored line on first tick and writes an audit log', async () => {
   const out = await tick(100);
   assert.match(out, /Matei is the best/);
-  const auditFilePath = path.join(home, 'audit-default.log');
+  const auditFilePath = path.join(home, 'audit.log');
   assert.ok(existsSync(auditFilePath));
   assert.match(readFileSync(auditFilePath, 'utf8'), /window\/open/);
 });

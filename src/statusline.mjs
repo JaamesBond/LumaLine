@@ -14,7 +14,7 @@
 //     cost/token values stay local.
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, renameSync } from 'node:fs';
 import {
-  LUMALINE_HOME, PUB, KEYS_DIR, statePath, auditPath, FEED_BASE,
+  LUMALINE_HOME, PUB, KEYS_DIR, statePath, AUDIT, FEED_BASE,
   FETCH_TIMEOUT_MS, COOLDOWN_MS, HYPERLINKS, SHOW_URL, COLOR, COLOR_RESET,
 } from './config.mjs';
 import { step } from './client/window.mjs';
@@ -31,10 +31,9 @@ const loadJson = (p, def) => { try { return JSON.parse(readFileSync(p, 'utf8'));
 // src/client/auth.mjs). A crash or an overlapping tick can never leave a truncated,
 // unparseable state file — a reader always sees a complete old-or-new file.
 const atomicWrite = (p, data) => { const tmp = `${p}.${process.pid}.tmp`; writeFileSync(tmp, data); renameSync(tmp, p); };
-let stateFile = null;   // set per-session in main()
-let auditFile = null;
+let stateFile = null;   // set per-session in main(); STATE is per-session, AUDIT is one shared log
 const saveJson = (p, o) => atomicWrite(p, JSON.stringify(o));
-const audit = (evt) => appendFileSync(auditFile, JSON.stringify({ ts: now, ...evt }) + '\n');
+const audit = (evt) => appendFileSync(AUDIT, JSON.stringify({ ts: now, ...evt }) + '\n');
 
 // OSC 8 hyperlink: makes the wrapped text clickable in supporting terminals. URL safety
 // (absolute http(s), no control chars) lives in ./lib/url.mjs — used for both the visible
@@ -93,7 +92,6 @@ async function main() {
   const claude = readClaudeStdin();
   const key = sessionKey(claude);
   stateFile = statePath(key);
-  auditFile = auditPath(key);
   const base = baseStatus(claude);
   const activity = activitySignal(claude);
   const state = loadJson(stateFile, null);

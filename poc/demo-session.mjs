@@ -22,7 +22,7 @@ const server = path.join(here, 'backend', 'server.mjs');
 const statusline = path.join(root, 'src', 'statusline.mjs');
 const PRIV = path.join(RUNTIME, 'keys', 'private.pem');
 // Same current_dir-fallback key the client derives (stdin carries no session_id) — used to
-// reset the correct per-session state/audit files between runs.
+// reset the correct per-session STATE file between runs (AUDIT is a single shared audit.log).
 const KEY = sessionKey({ workspace: { current_dir: here } });
 
 const TTY = process.stdout.isTTY && !process.argv.includes('--plain');
@@ -98,7 +98,7 @@ process.on('SIGINT', () => { cleanup(); process.exit(0); });
 
 (async () => {
   if (!existsSync(PRIV)) spawnSync('node', [keygen], { stdio: 'inherit', env });
-  for (const f of [`impression-state-${KEY}.json`, 'ad-cache.json', `audit-${KEY}.log`, 'backend-impressions.log']) {
+  for (const f of [`impression-state-${KEY}.json`, 'ad-cache.json', 'audit.log', 'backend-impressions.log']) {
     try { rmSync(path.join(RUNTIME, f)); } catch {}
   }
   backend = spawn('node', [server], { stdio: 'ignore', env });
