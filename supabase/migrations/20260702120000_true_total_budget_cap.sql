@@ -137,14 +137,19 @@ begin
                 end
               )
             )
-            -- total budget guard: cumulative LIFETIME spend across ALL days, so a multi-day
-            -- flight is truly capped at its total budget (not just today's spend).
+            -- total budget guard: cumulative LIFETIME spend, counting only VALID (non-clawed-back)
+            -- delivery. Sums impressions.gross_micros in billable states (provisional + cleared), so
+            -- clawed-back/reversed spend is NOT charged against the budget — a refunded flight regains
+            -- its budget and keeps delivering. (void impressions have gross 0.) Matches the CPVA-only
+            -- semantics of the prior spent_micros accumulator, minus clawbacks. Indexed by
+            -- impressions_line_item_id_idx (20260627022224).
             and (
               li.budget_total_micros is null
               or (
-                select coalesce(sum(s.spent_micros), 0)
-                from public.line_item_daily_stats s
-                where s.line_item_id = li.id
+                select coalesce(sum(i.gross_micros), 0)
+                from public.impressions i
+                where i.line_item_id = li.id
+                  and i.state in ('provisional', 'cleared')
               ) < li.budget_total_micros
             )
         )
