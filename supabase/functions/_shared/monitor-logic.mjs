@@ -21,6 +21,7 @@ export const CHECK_NAMES = [
   'payout_stuck',
   'payout_failed',
   'charge_failed',
+  'billing_stalled',
   'billing_recon_drift',
   'payout_recon_drift',
 ];
@@ -234,8 +235,14 @@ export function sumLumalinePaymentIntents(paymentIntents) {
  * Tolerance mirrors the /reconcile endpoints exactly: ok ⇔ discrepancy === 0 micros.
  * (Known structural drift — e.g. cleared sub-Stripe-minimum entries — fires by design;
  * that is what /reconcile itself reports as not-ok.) Unreadable totals fire too.
- * Dedup key is the constant 'drift': one open alert while the condition persists,
- * resolved when the window reconciles to zero again.
+ *
+ * Dedup key is BUCKETED by sign + order of magnitude ('drift:+5' = positive drift in
+ * [1e5, 1e6) micros), NOT a constant: with a constant key, a small structural drift
+ * held one alert open and the partial-unique dedup then swallowed any LARGER new drift
+ * for the rest of the window — a €500 discrepancy hiding behind a €0.30 one, invisible
+ * to ops. A magnitude jump now lands in a new bucket → new alert + email; the old
+ * bucket's alert auto-resolves (its dedup key leaves the failing set). Within-bucket
+ * growth (< 10×) does not re-fire — accepted noise floor.
  * @param {string} name 'billing_recon_drift' | 'payout_recon_drift'
  * @param {unknown} dbTotalMicros
  * @param {unknown} stripeTotalMicros
@@ -249,10 +256,12 @@ export function evalReconDrift(name, dbTotalMicros, stripeTotalMicros, extra = {
   }
   const discrepancy = db - stripe;
   if (discrepancy === 0) return pass(name, `db == stripe == ${db} micros`);
+  const sign = discrepancy > 0 ? '+' : '-';
+  const magnitude = Math.floor(Math.log10(Math.abs(discrepancy)));
   return fail(name, `drift ${discrepancy} micros (db=${db}, stripe=${stripe})`, [{
     check_name: name,
     severity: 'critical',
-    dedup_key: 'drift',
+    dedup_key: `drift:${sign}${magnitude}`,
     payload: {
       db_total_micros: db,
       stripe_total_micros: stripe,
@@ -260,6 +269,59 @@ export function evalReconDrift(name, dbTotalMicros, stripeTotalMicros, extra = {
       ...extra,
     },
   }]);
+}
+
+/**
+ * CHECK. billing_stalled (HIGH, stateful) — advertisers with BOTH currently-paused
+ * line_items AND uncharged cleared billing groups. This is the state the live-mode
+ * no_payment_method path produces (billing pauses the items and deliberately writes NO
+ * advertiser_charges row so the group stays retryable): revenue collection has stopped
+ * while debt accrues. charge_failed cannot see it (no failed-charge row exists), and its
+ * 24h window ages out anyway; this check keys on CURRENT state, so the alert stays open
+ * until the groups are actually charged or the items unpaused — never a false
+ * "resolved" from mere passage of time. A manually-paused advertiser with no uncharged
+ * debt does NOT fire.
+ * @param {{unchargedRows?: Array<{advertiser_id?: string, advertiser_name?: string, amount_micros?: unknown}>,
+ *          pausedLineItems?: Array<{id?: string, advertiser_id?: string}>}} input
+ */
+export function evalBillingStalled(input) {
+  const name = 'billing_stalled';
+  const uncharged = Array.isArray(input?.unchargedRows) ? input.unchargedRows : [];
+  const paused = Array.isArray(input?.pausedLineItems) ? input.pausedLineItems : [];
+
+  const pausedByAdv = new Map();
+  for (const li of paused) {
+    const adv = li?.advertiser_id;
+    if (!adv) continue;
+    pausedByAdv.set(adv, (pausedByAdv.get(adv) ?? 0) + 1);
+  }
+
+  const debtByAdv = new Map();
+  for (const row of uncharged) {
+    const adv = row?.advertiser_id;
+    if (!adv || !pausedByAdv.has(adv)) continue;
+    const cur = debtByAdv.get(adv) ?? { name: row?.advertiser_name ?? null, groups: 0, micros: 0 };
+    cur.groups += 1;
+    const m = toMicros(row?.amount_micros);
+    // Unreadable micros still count the group (fail loud); the sum just omits it.
+    if (Number.isFinite(m)) cur.micros += m;
+    debtByAdv.set(adv, cur);
+  }
+
+  const alerts = [...debtByAdv.entries()].map(([adv, d]) => ({
+    check_name: name,
+    severity: 'high',
+    dedup_key: `adv:${adv}`,
+    payload: {
+      advertiser_id: adv,
+      advertiser_name: d.name,
+      paused_line_items: pausedByAdv.get(adv) ?? 0,
+      uncharged_groups: d.groups,
+      uncharged_micros: d.micros,
+    },
+  }));
+  if (alerts.length === 0) return pass(name, 'no advertiser is paused with uncharged cleared debt');
+  return fail(name, `${alerts.length} advertiser(s) paused with uncharged cleared debt`, alerts);
 }
 
 /**

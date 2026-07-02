@@ -49,6 +49,7 @@ import Stripe from "https://esm.sh/stripe@14.21.0?target=deno";
 import {
   buildAlertEmail,
   errorCheck,
+  evalBillingStalled,
   evalChargeFailed,
   evalLedgerZeroSum,
   evalPayoutFailed,
@@ -199,6 +200,45 @@ async function checkChargeFailed(): Promise<CheckResult> {
     }
   }
   return evalChargeFailed({ failedCharges, pausedLineItems });
+}
+
+// billing_stalled (stateful): advertisers with BOTH currently-paused line_items AND
+// uncharged cleared billing groups — the live-mode no_payment_method state (billing
+// pauses the items and deliberately writes NO charges row so the group stays retryable).
+// Keys on CURRENT state: stays open until the debt is charged or the items unpaused.
+async function checkBillingStalled(): Promise<CheckResult> {
+  const name = "billing_stalled";
+  const liRes = await svc("GET", "line_items", {
+    query: "status=eq.paused&select=id,campaign_id&limit=500",
+  });
+  if (!liRes.ok) return errorCheck(name, `line_items query HTTP ${liRes.status}`);
+  const pausedRaw = (liRes.data as Array<{ id: string; campaign_id: string }>) ?? [];
+
+  let pausedLineItems: Array<Record<string, unknown>> = [];
+  if (pausedRaw.length > 0) {
+    const campIds = [...new Set(pausedRaw.map((li) => li.campaign_id).filter(Boolean))];
+    const campsRes = await svc("GET", "campaigns", {
+      query: `id=in.(${campIds.join(",")})&select=id,advertiser_id`,
+    });
+    if (!campsRes.ok) return errorCheck(name, `campaigns query HTTP ${campsRes.status}`);
+    const byId = new Map(
+      ((campsRes.data as Array<{ id: string; advertiser_id: string }>) ?? [])
+        .map((c) => [c.id, c.advertiser_id]),
+    );
+    pausedLineItems = pausedRaw.map((li) => ({ ...li, advertiser_id: byId.get(li.campaign_id) ?? null }));
+  }
+
+  // The uncharged view already excludes house/sentinel from ever being charged, but be
+  // explicit: only non-house debt counts as stalled revenue.
+  const viewRes = await svc("GET", "uncharged_advertiser_billings", {
+    query: "is_house=eq.false&select=advertiser_id,advertiser_name,amount_micros&limit=1000",
+  });
+  if (!viewRes.ok) return errorCheck(name, `uncharged_advertiser_billings query HTTP ${viewRes.status}`);
+
+  return evalBillingStalled({
+    unchargedRows: (viewRes.data as Array<Record<string, unknown>>) ?? [],
+    pausedLineItems,
+  });
 }
 
 // e. Mirrors billing/index.ts /reconcile EXACTLY: DB = billing_recon_totals(from,to)
@@ -362,6 +402,7 @@ Deno.serve(async (req) => {
       ["payout_stuck", checkPayoutStuck],
       ["payout_failed", checkPayoutFailed],
       ["charge_failed", checkChargeFailed],
+      ["billing_stalled", checkBillingStalled],
       ["billing_recon_drift", () => checkBillingReconDrift(fromDate, toDate)],
       ["payout_recon_drift", () => checkPayoutReconDrift(fromDate, toDate)],
     ];
