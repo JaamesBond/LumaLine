@@ -1,6 +1,6 @@
 # LumaLine Advertiser Terms of Service
 
-**Last updated:** 2026-06-29 · **Effective:** upon owner sign-off · **Status:** v1.0 DRAFT — pending owner sign-off (Aivora SRL)
+**Last updated:** 2026-07-02 · **Effective:** 2026-07-02 · **Status:** v1.0 IN FORCE — owner sign-off 2026-07-02 (Aivora SRL); sign-off act = owner merge of the M5 PR containing this change
 
 These Advertiser Terms of Service ("Advertiser Terms") govern your participation
 as an **advertiser** on LumaLine, operated by **Aivora SRL** (Romania)

@@ -1,6 +1,6 @@
 # LumaLine Advertising Policy
 
-**Last updated:** 2026-06-29 · **Effective:** upon owner sign-off · **Status:** v1.0 DRAFT — pending owner sign-off (Aivora SRL)
+**Last updated:** 2026-07-02 · **Effective:** 2026-07-02 · **Status:** v1.0 IN FORCE — owner sign-off 2026-07-02 (Aivora SRL); sign-off act = owner merge of the M5 PR containing this change
 
 This Advertising Policy ("Ad Policy") governs all advertising campaigns placed
 on LumaLine ("we", "us", "LumaLine"), a product of **Aivora SRL** (Romania).
