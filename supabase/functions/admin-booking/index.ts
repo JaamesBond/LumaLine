@@ -227,7 +227,7 @@ Deno.serve(async (req) => {
     // no explicit daily cap ("spend €X over Y days"). Even pacing then spreads the total
     // across the flight; the cumulative total cap (migration 20260702120000) stops it at the
     // total. An explicitly-provided budget_daily_micros is respected as-is.
-    if (row.budget_daily_micros === undefined &&
+    if (row.budget_daily_micros == null &&
         typeof row.budget_total_micros === "number" &&
         typeof row.start_at === "string" && typeof row.end_at === "string") {
       const startMs = Date.parse(row.start_at);
