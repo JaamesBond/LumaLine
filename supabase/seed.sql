@@ -83,7 +83,7 @@ on conflict (id) do nothing;
 insert into public.creatives (id, line_item_id, line, dest_url, label, status) values
   ('5e470000-0000-4000-8000-00000000e001', '5e470000-0000-4000-8000-00000000f001',
    'LumaLine — honest, signed ads for Claude Code',
-   'https://luma-line.lovable.app', 'sponsored', 'active')
+   'https://lumaline.dev', 'sponsored', 'active')
 on conflict (id) do nothing;
 
 -- M2-T3: dev-admin is a separate identity from publisher dev-a (11111111...) so that

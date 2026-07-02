@@ -122,3 +122,16 @@ test('open falls back to "cli" when cfg has no sessionId', async () => {
   await step({ state: null, now: 1000, activity: 1, post, cfg: cfgOK });
   assert.equal(calls[0].body.sessionId, 'cli');
 });
+
+test('startedAt is sampled from cfg.clock AFTER the open round-trip (server-dwell alignment)', async () => {
+  const { post } = fakePost();
+  // now (pre-open) is 1000; the clock advances to 6000 by the time /window/open returns.
+  const r = await step({ state: null, now: 1000, activity: 1, post, cfg: { ...cfgOK, clock: () => 6000 } });
+  assert.equal(r.state.startedAt, 6000);   // post-open time, NOT the pre-fetch now
+});
+
+test('startedAt falls back to `now` when cfg.clock is absent (pure-clock tests stay deterministic)', async () => {
+  const { post } = fakePost();
+  const r = await step({ state: null, now: 4242, activity: 1, post, cfg: cfgOK });
+  assert.equal(r.state.startedAt, 4242);
+});

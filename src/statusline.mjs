@@ -101,7 +101,7 @@ async function main() {
   try { authToken = await getValidAccessToken({ now }); } catch { authToken = null; }
   let r;
   try {
-    r = await step({ state, now, activity, post, cfg: { cooldownMs: COOLDOWN_MS, verifyAd, showUrl: SHOW_URL, sessionId: key } });
+    r = await step({ state, now, activity, post, cfg: { cooldownMs: COOLDOWN_MS, verifyAd, showUrl: SHOW_URL, sessionId: key, clock: Date.now } });
   } catch (e) {
     audit({ event: 'step_error', message: e && e.message });
     return base;   // backend unreachable / error -> graceful base status, nothing billed

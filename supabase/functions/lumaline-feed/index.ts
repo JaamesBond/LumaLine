@@ -194,7 +194,7 @@ Deno.serve(async (req) => {
     // resolves it to a 302 at the advertiser dest. No open-redirect risk: the URL is signed by us
     // and the client re-validates http(s). Falls back to the direct dest if no token was minted
     // (defensive). LUMALINE_CLICK_BASE defaults to the branded proxy; override for local dev.
-    const dest = Deno.env.get("LUMALINE_SELFPROMO_DEST") ?? "https://luma-line.lovable.app";
+    const dest = Deno.env.get("LUMALINE_SELFPROMO_DEST") ?? "https://lumaline.dev";
     const clickBase = Deno.env.get("LUMALINE_CLICK_BASE") ?? "https://c.lumaline.dev";
     const token = rpc.click_token as string | undefined;
     const clickUrl = token ? `${clickBase}/c/${token}` : dest;
