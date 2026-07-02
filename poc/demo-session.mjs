@@ -8,17 +8,22 @@ import { spawn, spawnSync } from 'node:child_process';
 import { rmSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sessionKey } from '../src/client/session.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));   // poc/
 const root = path.resolve(here, '..');
 const RUNTIME = path.join(here, '.runtime');
 // Hyperlinks off here so the mock can re-style the line; clickability is shown live.
-const env = { ...process.env, LUMALINE_HOME: RUNTIME, LUMALINE_PORT: '8787', LUMALINE_FEED: 'http://127.0.0.1:8787', LUMALINE_HYPERLINKS: '0' };
+// LUMALINE_PUBKEY: verify against THIS demo's dev key, not the bundled prod key (see poc/demo.mjs).
+const env = { ...process.env, LUMALINE_HOME: RUNTIME, LUMALINE_PORT: '8787', LUMALINE_FEED: 'http://127.0.0.1:8787', LUMALINE_HYPERLINKS: '0', LUMALINE_PUBKEY: path.join(RUNTIME, 'keys', 'public.pem') };
 
 const keygen = path.join(here, 'backend', 'keygen.mjs');
 const server = path.join(here, 'backend', 'server.mjs');
 const statusline = path.join(root, 'src', 'statusline.mjs');
 const PRIV = path.join(RUNTIME, 'keys', 'private.pem');
+// Same current_dir-fallback key the client derives (stdin carries no session_id) — used to
+// reset the correct per-session state/audit files between runs.
+const KEY = sessionKey({ workspace: { current_dir: here } });
 
 const TTY = process.stdout.isTTY && !process.argv.includes('--plain');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -93,7 +98,7 @@ process.on('SIGINT', () => { cleanup(); process.exit(0); });
 
 (async () => {
   if (!existsSync(PRIV)) spawnSync('node', [keygen], { stdio: 'inherit', env });
-  for (const f of ['impression-state.json', 'ad-cache.json', 'audit.log', 'backend-impressions.log']) {
+  for (const f of [`impression-state-${KEY}.json`, 'ad-cache.json', `audit-${KEY}.log`, 'backend-impressions.log']) {
     try { rmSync(path.join(RUNTIME, f)); } catch {}
   }
   backend = spawn('node', [server], { stdio: 'ignore', env });

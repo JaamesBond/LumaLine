@@ -43,7 +43,7 @@ export async function step({ state, now, activity, post, cfg }) {
   const cooled = state && now - state.startedAt >= state.dwellMs + cooldownMs;
   const activeSince = state && state.lastActivityValue !== activity;
   if (!state || (cooled && activeSince)) {
-    const w = await post('/window/open', { sessionId: 'cli', activitySnapshot: 'session' });
+    const w = await post('/window/open', { sessionId: cfg.sessionId ?? 'cli', activitySnapshot: 'session' });
     // Signed content only: select the trusted key by the envelope's keyid (absent => legacy
     // default), then verify. Unknown keyid or a bad sig => refuse (rotation-safe).
     if (!cfg.verifyAd(w.adData, w.sig, w.keyid)) return refuse();

@@ -12,13 +12,14 @@
 //     embedded in an OSC-8 escape, so a feed cannot inject terminal control sequences.
 //   - only a coarse activity bucket leaves the machine (see client/window.mjs); raw
 //     cost/token values stay local.
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, renameSync } from 'node:fs';
 import {
-  LUMALINE_HOME, PUB, KEYS_DIR, STATE, AUDIT, FEED_BASE,
+  LUMALINE_HOME, PUB, KEYS_DIR, statePath, auditPath, FEED_BASE,
   FETCH_TIMEOUT_MS, COOLDOWN_MS, HYPERLINKS, SHOW_URL, COLOR, COLOR_RESET,
 } from './config.mjs';
 import { step } from './client/window.mjs';
 import { getValidAccessToken } from './client/auth.mjs';
+import { sessionKey } from './client/session.mjs';
 import { loadKeyring } from './lib/keyring.mjs';
 import { safeClickUrl } from './lib/url.mjs';
 
@@ -26,8 +27,14 @@ mkdirSync(LUMALINE_HOME, { recursive: true });
 const now = Date.now();
 
 const loadJson = (p, def) => { try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return def; } };
-const saveJson = (p, o) => writeFileSync(p, JSON.stringify(o));
-const audit = (evt) => appendFileSync(AUDIT, JSON.stringify({ ts: now, ...evt }) + '\n');
+// Atomic write: sibling temp file then rename over the target (same pattern as
+// src/client/auth.mjs). A crash or an overlapping tick can never leave a truncated,
+// unparseable state file — a reader always sees a complete old-or-new file.
+const atomicWrite = (p, data) => { const tmp = `${p}.${process.pid}.tmp`; writeFileSync(tmp, data); renameSync(tmp, p); };
+let stateFile = null;   // set per-session in main()
+let auditFile = null;
+const saveJson = (p, o) => atomicWrite(p, JSON.stringify(o));
+const audit = (evt) => appendFileSync(auditFile, JSON.stringify({ ts: now, ...evt }) + '\n');
 
 // OSC 8 hyperlink: makes the wrapped text clickable in supporting terminals. URL safety
 // (absolute http(s), no control chars) lives in ./lib/url.mjs — used for both the visible
@@ -84,22 +91,25 @@ async function post(p, body) {
 
 async function main() {
   const claude = readClaudeStdin();
+  const key = sessionKey(claude);
+  stateFile = statePath(key);
+  auditFile = auditPath(key);
   const base = baseStatus(claude);
   const activity = activitySignal(claude);
-  const state = loadJson(STATE, null);
+  const state = loadJson(stateFile, null);
   // Attribution: if a publisher is logged in, attach their short-lived device token so credit
   // binds to their publisher_id; otherwise stay anonymous (sentinel). Never throws (the hot
   // path degrades to anonymous on any error), and only hits the network near token expiry.
   try { authToken = await getValidAccessToken({ now }); } catch { authToken = null; }
   let r;
   try {
-    r = await step({ state, now, activity, post, cfg: { cooldownMs: COOLDOWN_MS, verifyAd, showUrl: SHOW_URL } });
+    r = await step({ state, now, activity, post, cfg: { cooldownMs: COOLDOWN_MS, verifyAd, showUrl: SHOW_URL, sessionId: key } });
   } catch (e) {
     audit({ event: 'step_error', message: e && e.message });
     return base;   // backend unreachable / error -> graceful base status, nothing billed
   }
-  if (r.verifyFail) { audit({ event: 'verify_fail' }); saveJson(STATE, null); return base; }
-  saveJson(STATE, r.state);
+  if (r.verifyFail) { audit({ event: 'verify_fail' }); saveJson(stateFile, null); return base; }
+  saveJson(stateFile, r.state);
   if (!r.status) return base;
   // r.status already carries the inline URL + "sponsored" disclosure (built in client/window.mjs,
   // gated by SHOW_URL). OSC-8 makes the WHOLE line clickable where Claude Code forwards it (IDE
