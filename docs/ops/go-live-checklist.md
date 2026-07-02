@@ -1,8 +1,12 @@
 # M5 GO-LIVE gate checklist (M5-T1)
 
 **Rule: a single ❌ is a hard NO-GO for the live-key swap.** 🟡 = owner action required.
-Verified mechanically where possible; evidence per item. Last verified: 2026-07-02 (overnight
-M5 prep session). Final go/no-go signature = owner.
+⚠️ RISK-ACCEPTED = a hard gate the owner has explicitly chosen to accept rather than fully
+close. Verified mechanically where possible; evidence per item. Last verified: 2026-07-02.
+Final go/no-go signature = owner.
+
+**Status 2026-07-02: 16/17 green + 1 owner-risk-accepted (T7). Remaining before swap:
+row 13 (Connect live platform-profile confirm) + row 15 (first real advertiser).**
 
 | # | Gate | Status | Evidence |
 |---|------|--------|----------|
@@ -15,7 +19,7 @@ M5 prep session). Final go/no-go signature = owner.
 | 7 | Webhook signature verification live | ✅ | M4 multi-secret verify (platform-signed `transfer.reversed`→200, connect-signed `account.updated`→200, bogus→400 on remote) |
 | 8 | Sentinel/house never bills | ✅ | Remote constraint `line_items_house_bids_zero` CHECK present (verified 2026-07-02 via `pg_constraint`); house is_house skip in billing fn |
 | 9 | Keyid multi-key trust + branded URL in GA client | ✅ | `lumaline@0.1.0` = npm `latest` (SLSA provenance); `src/config.mjs` defaults `feed.lumaline.dev` / `c.lumaline.dev`; keyid `8720926064dfdf50` + next-key parked |
-| 10 | Independent external security review (T7): high/criticals closed | ❌ | **STILL OPEN — owner-owned hard gate.** Reviewer hand-off package ready: `docs/ops/t7-external-review-brief.md` + full attack-surface inventory `docs/superpowers/t7/`. Internal live-DB audit clean (`docs/ops/live-security-audit-2026-07-02.md`: 0 ERROR/CRITICAL advisors, RLS gates all money tables, anon reads 0 rows, `app.admins` unreachable, admin RPCs internally gated) — but this does NOT substitute for an external human review. Commission a third party (see brief §7), or record dated risk-acceptance here |
+| 10 | Independent external security review (T7): high/criticals closed | ⚠️ RISK-ACCEPTED | **OWNER RISK-ACCEPTANCE 2026-07-02 (NOT an independent human review).** An AI/automated review was run; its only critical was operational (a plaintext `.env` could leak if the working tree is bundled) — **verified git-clean** (both `.env` gitignored, never committed, absent from history, unstaged by `git add -A`; no tracked file holds a real key) and remediated (`scripts/bundle-for-review.sh`, fail-closed). No code-level high/critical surfaced. Also backed by cc's live-DB audit (`docs/ops/live-security-audit-2026-07-02.md`: 0 ERROR/CRITICAL advisors, RLS gates all money tables, anon reads 0 rows, `app.admins` unreachable, admin RPCs internally gated). **The owner explicitly accepts the risk of going live without an independent human review.** Reviewer package remains ready (`docs/ops/t7-external-review-brief.md` + `docs/superpowers/t7/`) should a human pass be commissioned later. |
 | 11 | Live Stripe account activated | ✅ | API probe 2026-07-02: `charges_enabled=true, payouts_enabled=true, details_submitted=true`, country=RO, currency=eur |
 | 12 | Live restricted key valid + minimal perms | ✅ | Leaked first key ROLLED by owner 2026-07-02; replacement verified same day: all read probes 200, `charges_enabled=true payouts_enabled=true` (RO/EUR), customers:write probe OK (create+delete). Key lives only in `.env` `STRIPE_SECRET_KEY_LIVE` |
 | 13 | Connect **live** platform profile complete | 🟡 | Owner: Dashboard → Settings → Connect → Platform profile (live mode), incl. loss-liability acknowledgment. Likely already satisfied (account fully activated, `payouts_enabled=true`); confirm before first live payout |
