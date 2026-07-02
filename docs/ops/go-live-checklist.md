@@ -9,7 +9,7 @@ M5 prep session). Final go/no-go signature = owner.
 | 1 | Publisher legal signed (ToS §7 payouts) | ✅ | `publisher-tos.md` v1.1 IN FORCE 2026-07-01, PR #9 owner-merged |
 | 2 | Advertiser legal signed (ToS + Ad Policy) | 🟡 | v1.0 IN FORCE flip staged in the M5 PR — **owner merge = sign-off act** |
 | 3 | Backups tested (restore drill) | ✅ | 2026-07-02: `pg_dump -Fc` (3.1 MB) via pooler → restored into local scratch DB; 27 migrations, 21 public/app tables, all money-table row counts identical (ledger 0 = clean post-e2e state); impressions Δ1 = post-snapshot live tick (append-only). Errors: excluded infra schemas only |
-| 4 | Money-path monitoring live (T6): ledger-imbalance + payout-failure + recon-drift alerts, proven by injected fault | ⏳ tonight | monitor fn + `app.alert_events` + pg_cron hourly; drill result: **[FILL: T6-DRILL]** |
+| 4 | Money-path monitoring live (T6): ledger-imbalance + payout-failure + recon-drift alerts, proven by injected fault | 🟡 | Code complete + locally proven (7 checks; `billing_stalled` fire→resolve cycle + nonzero recon totals verified against the live local stack 2026-07-02). Remote deploy + drill = owner runs `m5-deploy-t6.sh` then `m5-drill-t6.sh` (scratchpad; auto-mode blocks cc from production DB writes). Paste drill output here |
 | 5 | Charge idempotency + reconciliation green (TEST) | ✅ | M2 e2e + M4 CPC acceptance (dry-run bills cleared CPC group exactly once); `UNIQUE(entry_group_id)` + Stripe idempotency keys |
 | 6 | Payout idempotency + reconciliation green (TEST) | ✅ | M3 live test-mode e2e 2026-07-01: real €30 EUR transfer → confirm → ledger balanced → `/reconcile` green → real reversal → `payout_reverse` net 0 |
 | 7 | Webhook signature verification live | ✅ | M4 multi-secret verify (platform-signed `transfer.reversed`→200, connect-signed `account.updated`→200, bogus→400 on remote) |
@@ -21,8 +21,8 @@ M5 prep session). Final go/no-go signature = owner.
 | 13 | Connect **live** platform profile complete | 🟡 | Unverified — owner: Dashboard → Settings → Connect → Platform profile (live mode), incl. loss-liability acknowledgment |
 | 14 | LIVE webhook endpoints created + secrets staged | 🟡 | Script ready (`live-webhooks.mjs`, scratchpad): connected `account.updated` + platform `transfer.reversed`/`transfer.canceled` → staged as `STRIPE_WEBHOOK_SECRET_LIVE` in `.env`. Run AFTER #12 rotation (auto-mode requires owner run/approval) |
 | 15 | ≥1 REAL advertiser: contract + KYC + creative + budget + bid>0 + payment method | ❌ | None yet — owner sources; runbook `docs/ops/advertiser-onboarding.md`; billing live-PM path + `/billing/setup-link` shipped in the M5 PR |
-| 16 | New money-path code adversarially reviewed | ⏳ tonight | **[FILL: REVIEW]** |
-| 17 | Test suite green | ⏳ tonight | **[FILL: TESTS]** baseline 244 tests / 0 fail |
+| 16 | New money-path code adversarially reviewed | ✅ | 2026-07-02: money-safety lens (multi-agent) → 4 findings, all fixed (`8862da9`, `ef4d9e2`): terminal-skip revenue loss (HIGH), drift-dedup alert swallowing, monitor blindness to the no-PM stall, false auto-resolve. Correctness/security/integration lenses reviewed inline with live-stack verification after the agent pool hit a session limit |
+| 17 | Test suite green | ✅ | 2026-07-02: `node --test` **324 tests / 279 pass / 0 fail / 45 skipped** (baseline 244 → +80; skips = integration files without the local stack) |
 
 ## The swap itself (only after every row above is ✅)
 
