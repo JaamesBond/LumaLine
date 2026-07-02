@@ -360,6 +360,44 @@ test('T7 — sentinel window credits with gross=0 (honest billing invariant)', {
 });
 
 // ---------------------------------------------------------------------------
+// TOL: dwell tolerance — a window whose SERVER-measured dwell lands within v_tolerance
+// (1000ms) BELOW dwell_ms still credits. Guards the edge-latency fix
+// (20260703010000_close_window_dwell_tolerance.sql): the client stamps its dwell start
+// BEFORE the /window/open round-trip, the server stamps ad_windows.started_at AFTER it, so
+// an honest full dwell measures a few hundred ms short server-side at real edge latency.
+// Without the tolerance this legitimate PAID impression was thrown away as 'dwell too short'
+// (window 'abandoned', no credit → lost advertiser revenue + uncredited publisher).
+// Deterministic: backdate started_at to now()-4600ms (between dwell_ms-tolerance=4000 and
+// dwell_ms=5000) instead of racing the wall clock. The OLD close_window rejected this.
+// ---------------------------------------------------------------------------
+test('TOL — a paid dwell within tolerance of dwell_ms still credits (edge-latency fix)', {
+  skip: !UP ? `PostgREST unreachable at ${BASE}`
+    : !PSQL_OK ? 'psql unavailable (needed to backdate started_at)'
+    : false,
+}, async () => {
+  const jwt = mintDeviceJwt(PUB_A);
+  const win = await rpc('window_open', { p_activity_snapshot: 'session' }, { jwt });
+  assert.ok(win.window_id, 'window opened');
+
+  // 3 anti-batch-respecting beats (>= minBeats, spaced > 500ms) so beats_count and
+  // activity_progress gates are satisfied, then backdate started_at so the server measures
+  // elapsed ~4600ms — under dwell_ms (5000) but inside the 1000ms tolerance.
+  let prevHash = win.window_id;
+  for (let seq = 1; seq <= 3; seq++) {
+    await sleep(BEAT_SPACING_MS);
+    const hmac = beatHmac(win.challenge, seq, prevHash, ACTIVITY_DELTA);
+    await rpc('window_beat', { p_window_id: win.window_id, p_seq: seq, p_hmac: hmac, p_activity_delta: ACTIVITY_DELTA }, { jwt });
+    prevHash = hmac;
+  }
+  psql(`update public.ad_windows set started_at = now() - interval '4600 milliseconds' where window_id = '${win.window_id}'`);
+
+  const res = await rpc('close_window', { p_window_id: win.window_id }, { jwt });
+  assert.equal(res.credited, true, `sub-dwell-but-in-tolerance window MUST credit (reason=${res.reason})`);
+  assert.ok(res.gross_micros > 0, 'paid impression credits gross_micros > 0 within tolerance');
+  assert.ok(res.attention_seconds >= 4, `attention reflects the real ~4.6s elapsed capped at dwell (got ${res.attention_seconds})`);
+});
+
+// ---------------------------------------------------------------------------
 // B1: cumulative total-budget cap counts only VALID impressions — a line item is
 // suppressed once lifetime spend (sum of provisional+cleared impressions.gross_micros)
 // reaches budget_total_micros, but a clawed_back impression of the same amount does NOT
