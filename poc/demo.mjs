@@ -5,19 +5,27 @@ import { spawn, spawnSync } from 'node:child_process';
 import { rmSync, existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sessionKey } from '../src/client/session.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));   // poc/
 const root = path.resolve(here, '..');
 const RUNTIME = path.join(here, '.runtime');
-const env = { ...process.env, LUMALINE_HOME: RUNTIME, LUMALINE_PORT: '8787', LUMALINE_FEED: 'http://127.0.0.1:8787' };
+// LUMALINE_PUBKEY points the client at THIS demo's dev key. A prod public key ships bundled at
+// src/keys/public.pem (M4), which config.PUB prefers by default — so without this the client would
+// verify the demo's dev-signed feed against the prod key and refuse every ad (verify_fail).
+const env = { ...process.env, LUMALINE_HOME: RUNTIME, LUMALINE_PORT: '8787', LUMALINE_FEED: 'http://127.0.0.1:8787', LUMALINE_PUBKEY: path.join(RUNTIME, 'keys', 'public.pem') };
 
 const keygen = path.join(here, 'backend', 'keygen.mjs');
 const server = path.join(here, 'backend', 'server.mjs');
 const statusline = path.join(root, 'src', 'statusline.mjs');
 
-const STATE = path.join(RUNTIME, 'impression-state.json');
+// The demo's stdin carries no session_id, only workspace.current_dir=root, so the client
+// keys its state/audit files on the current_dir fallback. Derive the SAME key here so the
+// demo reads the real audit log and resets the right files between runs.
+const KEY = sessionKey({ workspace: { current_dir: root } });
+const STATE = path.join(RUNTIME, `impression-state-${KEY}.json`);
 const AD_CACHE = path.join(RUNTIME, 'ad-cache.json');
-const AUDIT = path.join(RUNTIME, 'audit.log');
+const AUDIT = path.join(RUNTIME, `audit-${KEY}.log`);
 const BACKEND_LOG = path.join(RUNTIME, 'backend-impressions.log');
 const PRIV = path.join(RUNTIME, 'keys', 'private.pem');
 
