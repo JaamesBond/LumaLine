@@ -13,8 +13,12 @@ export const LUMALINE_HOME = env.LUMALINE_HOME || path.join(home, '.lumaline');
 export const KEYS = path.join(LUMALINE_HOME, 'keys');
 export const PRIV = path.join(KEYS, 'private.pem');                 // backend/dev only
 export const AD_CACHE = path.join(LUMALINE_HOME, 'ad-cache.json');
-export const STATE = path.join(LUMALINE_HOME, 'impression-state.json');
-export const AUDIT = path.join(LUMALINE_HOME, 'audit.log');
+// Per-session state + audit paths. Each Claude Code window (keyed by session id — see
+// src/client/session.mjs) gets its OWN files, so concurrent windows never share one state
+// slot. Previously a single global impression-state.json/audit.log that concurrent windows
+// stomped, under-counting impressions.
+export const statePath = (key) => path.join(LUMALINE_HOME, `impression-state-${key}.json`);
+export const auditPath = (key) => path.join(LUMALINE_HOME, `audit-${key}.log`);
 // Publisher device credential (M1 login). A 0600 JSON file holding the short-lived access
 // token + rotating refresh token + identity (publisher_id/device_id/handle/exp). The
 // per-tick statusline reads this on the hot path, so it must be a cheap local read — see
