@@ -1,0 +1,35 @@
+# M5 GO-LIVE gate checklist (M5-T1)
+
+**Rule: a single ❌ is a hard NO-GO for the live-key swap.** 🟡 = owner action required.
+Verified mechanically where possible; evidence per item. Last verified: 2026-07-02 (overnight
+M5 prep session). Final go/no-go signature = owner.
+
+| # | Gate | Status | Evidence |
+|---|------|--------|----------|
+| 1 | Publisher legal signed (ToS §7 payouts) | ✅ | `publisher-tos.md` v1.1 IN FORCE 2026-07-01, PR #9 owner-merged |
+| 2 | Advertiser legal signed (ToS + Ad Policy) | 🟡 | v1.0 IN FORCE flip staged in the M5 PR — **owner merge = sign-off act** |
+| 3 | Backups tested (restore drill) | ✅ | 2026-07-02: `pg_dump -Fc` (3.1 MB) via pooler → restored into local scratch DB; 27 migrations, 21 public/app tables, all money-table row counts identical (ledger 0 = clean post-e2e state); impressions Δ1 = post-snapshot live tick (append-only). Errors: excluded infra schemas only |
+| 4 | Money-path monitoring live (T6): ledger-imbalance + payout-failure + recon-drift alerts, proven by injected fault | ⏳ tonight | monitor fn + `app.alert_events` + pg_cron hourly; drill result: **[FILL: T6-DRILL]** |
+| 5 | Charge idempotency + reconciliation green (TEST) | ✅ | M2 e2e + M4 CPC acceptance (dry-run bills cleared CPC group exactly once); `UNIQUE(entry_group_id)` + Stripe idempotency keys |
+| 6 | Payout idempotency + reconciliation green (TEST) | ✅ | M3 live test-mode e2e 2026-07-01: real €30 EUR transfer → confirm → ledger balanced → `/reconcile` green → real reversal → `payout_reverse` net 0 |
+| 7 | Webhook signature verification live | ✅ | M4 multi-secret verify (platform-signed `transfer.reversed`→200, connect-signed `account.updated`→200, bogus→400 on remote) |
+| 8 | Sentinel/house never bills | ✅ | Remote constraint `line_items_house_bids_zero` CHECK present (verified 2026-07-02 via `pg_constraint`); house is_house skip in billing fn |
+| 9 | Keyid multi-key trust + branded URL in GA client | ✅ | `lumaline@0.1.0` = npm `latest` (SLSA provenance); `src/config.mjs` defaults `feed.lumaline.dev` / `c.lumaline.dev`; keyid `8720926064dfdf50` + next-key parked |
+| 10 | Independent external security review (T7): high/criticals closed | ❌ | **NOT DONE — owner-owned hard gate.** Internal adversarial reviews + `/security-review` do NOT substitute. Commission a third party, or owner formally records risk acceptance in this file |
+| 11 | Live Stripe account activated | ✅ | API probe 2026-07-02: `charges_enabled=true, payouts_enabled=true, details_submitted=true`, country=RO, currency=eur |
+| 12 | Live restricted key valid + minimal perms | ❌ | **Key COMPROMISED 2026-07-02** (leaked into session transcript by tooling redaction failure). Owner must ROLL it and issue a new restricted key — required perms listed in `docs/ops/live-key-permissions.md`. New key → `.env` `STRIPE_SECRET_KEY_LIVE` only |
+| 13 | Connect **live** platform profile complete | 🟡 | Unverified — owner: Dashboard → Settings → Connect → Platform profile (live mode), incl. loss-liability acknowledgment |
+| 14 | LIVE webhook endpoints created + secrets staged | 🟡 | Script ready (`live-webhooks.mjs`, scratchpad): connected `account.updated` + platform `transfer.reversed`/`transfer.canceled` → staged as `STRIPE_WEBHOOK_SECRET_LIVE` in `.env`. Run AFTER #12 rotation (auto-mode requires owner run/approval) |
+| 15 | ≥1 REAL advertiser: contract + KYC + creative + budget + bid>0 + payment method | ❌ | None yet — owner sources; runbook `docs/ops/advertiser-onboarding.md`; billing live-PM path + `/billing/setup-link` shipped in the M5 PR |
+| 16 | New money-path code adversarially reviewed | ⏳ tonight | **[FILL: REVIEW]** |
+| 17 | Test suite green | ⏳ tonight | **[FILL: TESTS]** baseline 244 tests / 0 fail |
+
+## The swap itself (only after every row above is ✅)
+
+1. `supabase secrets set STRIPE_SECRET_KEY=<sk/rk_live from .env>` (project `prmsonskzrubqsazmpwd`).
+2. `supabase secrets set STRIPE_WEBHOOK_SECRET=<STRIPE_WEBHOOK_SECRET_LIVE from .env>` (comma-split connected,platform — same multi-secret fn).
+3. Redeploy nothing (secrets hot); run `GET /monitor/status` + a monitor run → all green on live keys.
+4. M5-T3: first real cleared impression → `POST /billing/charge?dry_run=true` → review → real run → exactly one live charge → `/billing/reconcile` green → sentinel still bills nothing.
+5. M5-T4 (≈7–10 days later, after clearing + hold): `POST /stripe-connect/payout/batch` (owner-authorized `p_min_micros`) → reconciled €1+ live payout. See `docs/ops/publisher-live-onboarding.md`.
+
+**Rollback:** set both secrets back to the test values (kept in `.env`/Vault history); the code is mode-agnostic.
