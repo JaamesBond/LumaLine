@@ -20,12 +20,12 @@ const server = path.join(here, 'backend', 'server.mjs');
 const statusline = path.join(root, 'src', 'statusline.mjs');
 
 // The demo's stdin carries no session_id, only workspace.current_dir=root, so the client
-// keys its state/audit files on the current_dir fallback. Derive the SAME key here so the
-// demo reads the real audit log and resets the right files between runs.
+// keys its per-session STATE file on the current_dir fallback. Derive the SAME key here so
+// the demo resets the right state file between runs. AUDIT is a single shared log.
 const KEY = sessionKey({ workspace: { current_dir: root } });
 const STATE = path.join(RUNTIME, `impression-state-${KEY}.json`);
 const AD_CACHE = path.join(RUNTIME, 'ad-cache.json');
-const AUDIT = path.join(RUNTIME, `audit-${KEY}.log`);
+const AUDIT = path.join(RUNTIME, 'audit.log');
 const BACKEND_LOG = path.join(RUNTIME, 'backend-impressions.log');
 const PRIV = path.join(RUNTIME, 'keys', 'private.pem');
 
