@@ -21,8 +21,10 @@
 //      c. Get or create Stripe customer (persist stripe_customer_id on advertiser).
 //      d. Resolve the payment method via choosePaymentMethod (_shared/billing-logic.mjs):
 //         saved default PM > first attached card > pm_card_visa (TEST MODE ONLY).
-//         Live mode with no saved PM → status='skipped' reason='no_payment_method' and the
-//         advertiser's line_items are paused (no credit extension without a PM).
+//         Live mode with no saved PM → the group is reported skipped (reason=
+//         no_payment_method) and the advertiser's line_items are paused, but NO
+//         advertiser_charges row is written — the group stays in the uncharged view
+//         and is charged by a later run once a PM is saved (retryable, not terminal).
 //      e. Create+confirm PaymentIntent with the resolved payment method.
 //         Idempotency key: lumaline_grp_{entry_group_id} — safe to re-run.
 //      f. Insert into advertiser_charges (UNIQUE on entry_group_id = idempotency backstop).
@@ -377,20 +379,16 @@ Deno.serve(async (req) => {
         // never fall through to the test token).
         const pmChoice = await resolvePaymentMethod(stripe, customerId);
         if ("skip" in pmChoice) {
-          // Live mode, no saved payment method: record the group as skipped (same
-          // table/status semantics as the below-minimum skip) and pause the
-          // advertiser's line_items exactly like the card_declined path — no credit
-          // extension without a PM. Other advertisers keep processing.
-          await insertCharge({
-            entry_group_id:    entry.entry_group_id,
-            advertiser_id:     entry.advertiser_id,
-            impression_id:     entry.impression_id,
-            amount_micros:     entry.amount_micros,
-            amount_cents:      amountCents,
-            stripe_customer_id: customerId,
-            status:            "skipped",
-            failure_reason:    "no_payment_method",
-          });
+          // Live mode, no saved payment method: pause the advertiser's line_items
+          // exactly like the card_declined path (no credit extension without a PM)
+          // and move on. Deliberately NO advertiser_charges row: the uncharged view
+          // excludes any group with a charges row regardless of status
+          // (ac.entry_group_id IS NULL), so inserting a 'skipped' row here would make
+          // the group PERMANENTLY unbillable — the publisher earning leg would stand
+          // while the advertiser is never charged. Leaving the group in the view means
+          // a later run charges it once the advertiser saves a PM via /setup-link.
+          // (below_stripe_minimum keeps its terminal skip-row: amounts can only be
+          // charged as a group and a sub-minimum group stays sub-minimum forever.)
           await pauseAdvertiserLineItems(entry.advertiser_id);
           results.push({
             entry_group_id: entry.entry_group_id,
