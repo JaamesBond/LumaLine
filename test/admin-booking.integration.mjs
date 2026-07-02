@@ -85,6 +85,40 @@ async function svcDelete(resource, query) {
   } catch { /* best-effort cleanup */ }
 }
 
+/** Create a fresh advertiser + campaign via the admin-JWT POST pattern (mirrors T15/T16). */
+async function createTestCampaign(label) {
+  const advRes = await fetch(`${EDGE_BASE}/advertisers`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Authorization: `Bearer ${ADMIN_JWT}` },
+    body: JSON.stringify({ name: `${label} Advertiser` }),
+  });
+  assert.equal(advRes.status, 201, `advertiser create: got ${advRes.status}`);
+  const advId = (await advRes.json()).id;
+
+  const campRes = await fetch(`${EDGE_BASE}/campaigns`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Authorization: `Bearer ${ADMIN_JWT}` },
+    body: JSON.stringify({ advertiser_id: advId, name: `${label} Campaign` }),
+  });
+  assert.equal(campRes.status, 201, `campaign create: got ${campRes.status}`);
+  const campId = (await campRes.json()).id;
+
+  return { advId, campId };
+}
+
+/** POST /line-items with the admin JWT, returning the parsed created row. */
+async function postLineItem(body) {
+  const res = await fetch(`${EDGE_BASE}/line-items`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Authorization: `Bearer ${ADMIN_JWT}` },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  assert.equal(res.status, 201,
+    `line_item create: got ${res.status}. Body: ${JSON.stringify(data)}`);
+  return data;
+}
+
 // ---------------------------------------------------------------------------
 // Stack reachability guard (same pattern as sentinel.integration.mjs)
 // ---------------------------------------------------------------------------
@@ -318,4 +352,53 @@ test('T18 — POST /line-items with non-zero bid on house campaign rejected (M2-
     res.status === 400 || res.status === 409 || res.status === 422,
     `Expected 400/409/422 for CHECK violation, got ${res.status}`,
   );
+});
+
+// ---------------------------------------------------------------------------
+// B2: budget_daily_micros is derived from budget_total_micros ÷ flight days when the
+// operator gives a total + start_at/end_at but omits the daily budget. An explicitly
+// provided budget_daily_micros must never be overridden.
+// ---------------------------------------------------------------------------
+test('B2 — daily budget is derived from total ÷ flight when omitted', {
+  skip: !UP ? `Edge function unreachable at ${EDGE_BASE}` : false,
+}, async () => {
+  let advId, campId, liId;
+  try {
+    ({ advId, campId } = await createTestCampaign('B2a'));
+    const li = await postLineItem({
+      campaign_id: campId,
+      budget_total_micros: 5_000_000,        // €5 in micros
+      start_at: '2026-07-01T00:00:00Z',
+      end_at:   '2026-07-06T00:00:00Z',      // 5-day flight
+      // budget_daily_micros intentionally omitted
+    });
+    liId = li.id;
+    assert.equal(li.budget_daily_micros, 1_000_000, 'daily = 5_000_000 / 5 days');
+  } finally {
+    if (liId)   await svcDelete('line_items', `id=eq.${liId}`);
+    if (campId) await svcDelete('campaigns', `id=eq.${campId}`);
+    if (advId)  await svcDelete('advertisers', `id=eq.${advId}`);
+  }
+});
+
+test('B2 — explicit daily budget is never overridden by derivation', {
+  skip: !UP ? `Edge function unreachable at ${EDGE_BASE}` : false,
+}, async () => {
+  let advId, campId, liId;
+  try {
+    ({ advId, campId } = await createTestCampaign('B2b'));
+    const li = await postLineItem({
+      campaign_id: campId,
+      budget_total_micros: 5_000_000,
+      budget_daily_micros: 250_000,          // explicit
+      start_at: '2026-07-01T00:00:00Z',
+      end_at:   '2026-07-06T00:00:00Z',
+    });
+    liId = li.id;
+    assert.equal(li.budget_daily_micros, 250_000, 'explicit daily budget preserved');
+  } finally {
+    if (liId)   await svcDelete('line_items', `id=eq.${liId}`);
+    if (campId) await svcDelete('campaigns', `id=eq.${campId}`);
+    if (advId)  await svcDelete('advertisers', `id=eq.${advId}`);
+  }
 });
