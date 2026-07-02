@@ -40,8 +40,15 @@ published), `docs/` prose.
 **Companion artifact:** `docs/superpowers/t7/t7-review-inventory.md` (internal, gitignored) is
 a full machine-generated inventory: every table's RLS + grants, every SECDEF function's
 EXECUTE grants + search_path, every route's auth, and the 7 money flows with enforcement
-points. Hand it to the reviewer as the map. **Do NOT include `supabase/functions/.env` or the
-repo-root `.env` in anything handed over — both hold live secrets.**
+points. Hand it to the reviewer as the map.
+
+**Secrets hygiene (verified 2026-07-02):** the repo-root `.env` (holds the live restricted
+key) and `supabase/functions/.env` (local dev — a *test* key) are **both gitignored, never
+committed, absent from all history**, and `git add -A` will not stage them. No tracked file
+contains a real key (`.env.example` is placeholders only). **To share the repo, use
+`scripts/bundle-for-review.sh`** — it builds the tarball via `git archive` (tracked files
+only) and fail-closed-aborts if any `.env`/`.secrets` slips in. Never `zip`/`cp -r` the
+working tree to share it: that would sweep in the gitignored `.env` files.
 
 ## 3. Threat model — what an attacker wants
 
