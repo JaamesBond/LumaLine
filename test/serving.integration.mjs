@@ -98,6 +98,15 @@ async function svcSelect(path) {
   return JSON.parse(text);
 }
 
+async function svcWrite(method, path, body) {
+  const res = await fetch(`${BASE}/${path}`, {
+    method,
+    headers: { apikey: SERVICE, Authorization: `Bearer ${SERVICE}`, 'content-type': 'application/json', Prefer: 'return=minimal' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${method} ${path} -> HTTP ${res.status}: ${await res.text()}`);
+}
+
 // Execute arbitrary SQL via service_role (used to read counters / set up edge cases).
 async function svcSql(query) {
   const res = await fetch(`${BASE}/../rest/v1/rpc/exec_sql`, {
@@ -331,4 +340,31 @@ test('T7 — sentinel window credits with gross=0 (honest billing invariant)', {
   // The sentinel creative has cpva=0, so gross is always 0.
   assert.equal(res.credited, true, `sentinel window should credit (gross=0 is still credited)`);
   assert.equal(res.gross_micros, 0, 'sentinel window MUST credit with gross=0 (honest billing)');
+});
+
+// ---------------------------------------------------------------------------
+// B1: cumulative total-budget cap — a line item is suppressed once LIFETIME spend
+// (sum across all days) reaches budget_total_micros, even if TODAY's spend is 0.
+// This distinguishes the new cumulative guard from the old "today's spend" proxy.
+// ---------------------------------------------------------------------------
+test('B1 — cumulative total budget cap suppresses a maxed-out line item', {
+  skip: UP ? false : `PostgREST unreachable at ${BASE}`,
+}, async () => {
+  const jwt = mintDeviceJwt(PUB_A);
+  // Arrange: tiny total budget, no daily cap; prior-day spend already meets the total.
+  // Today's spend is 0, so the OLD proxy guard would still serve it; the NEW guard must not.
+  await svcWrite('PATCH', `line_items?id=eq.${SEEDED_LINE_ITEM_ID}`,
+    { budget_total_micros: 1000, budget_daily_micros: null });
+  await svcWrite('POST', 'line_item_daily_stats',
+    [{ line_item_id: SEEDED_LINE_ITEM_ID, day: '2020-01-01', spent_micros: 1000 }]);
+  try {
+    const win = await rpc('window_open', { p_activity_snapshot: 'session' }, { jwt });
+    const servedPaid = !!(win.ad && win.ad.line && win.ad.house === undefined);
+    assert.equal(servedPaid, false,
+      'line item must NOT be served once cumulative spend >= budget_total_micros');
+  } finally {
+    // Restore seed state so other tests are unaffected.
+    await svcWrite('DELETE', `line_item_daily_stats?line_item_id=eq.${SEEDED_LINE_ITEM_ID}&day=eq.2020-01-01`, {});
+    await svcWrite('PATCH', `line_items?id=eq.${SEEDED_LINE_ITEM_ID}`, { budget_total_micros: null });
+  }
 });
