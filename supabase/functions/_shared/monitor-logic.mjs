@@ -387,10 +387,13 @@ export function buildAlertEmail(fired, resolved, checks) {
  */
 export async function timingSafeEqualStrings(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string' || a.length === 0 || b.length === 0) return false;
+  // Deno + Node >= 19 expose WebCrypto as globalThis.crypto; Node 18 (still in CI) only
+  // has it under node:crypto.webcrypto — fall back lazily so Deno never touches node:.
+  const subtle = globalThis.crypto?.subtle ?? (await import('node:crypto')).webcrypto.subtle;
   const enc = new TextEncoder();
   const [da, db] = await Promise.all([
-    globalThis.crypto.subtle.digest('SHA-256', enc.encode(a)),
-    globalThis.crypto.subtle.digest('SHA-256', enc.encode(b)),
+    subtle.digest('SHA-256', enc.encode(a)),
+    subtle.digest('SHA-256', enc.encode(b)),
   ]);
   const ba = new Uint8Array(da);
   const bb = new Uint8Array(db);
