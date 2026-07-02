@@ -110,3 +110,15 @@ test('refuses when the envelope carries an UNKNOWN keyid (rotation-safe)', async
   assert.equal(r.status, null);
   assert.equal(r.state, null);
 });
+
+test('open sends the per-session key from cfg.sessionId', async () => {
+  const { post, calls } = fakePost();
+  await step({ state: null, now: 1000, activity: 1, post, cfg: { ...cfgOK, sessionId: 'sess-42' } });
+  assert.equal(calls[0].body.sessionId, 'sess-42');
+});
+
+test('open falls back to "cli" when cfg has no sessionId', async () => {
+  const { post, calls } = fakePost();
+  await step({ state: null, now: 1000, activity: 1, post, cfg: cfgOK });
+  assert.equal(calls[0].body.sessionId, 'cli');
+});
