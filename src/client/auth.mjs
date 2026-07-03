@@ -14,7 +14,10 @@
 //   a stolen file is bounded in both time and effect. Hardening the at-rest store with the OS
 //   keychain (keeping the hot-path read cheap, e.g. a cached unlock) is a tracked follow-up.
 //   The token is NEVER written to the audit log and never echoed.
-import { writeFileSync, readFileSync, unlinkSync, mkdirSync, chmodSync, renameSync } from 'node:fs';
+import {
+  writeFileSync, readFileSync, unlinkSync, mkdirSync, chmodSync, renameSync,
+  openSync, closeSync, statSync,
+} from 'node:fs';
 import path from 'node:path';
 import {
   DEVICE_TOKEN, AUTH_BASE, TOKEN_REFRESH_SKEW_MS, FETCH_TIMEOUT_MS,
@@ -87,10 +90,40 @@ function shapeToken(data, nowMs, prior = {}) {
   };
 }
 
+// --- single-writer refresh lock -------------------------------------------------------
+// The refresh token is SINGLE-USE (the server rotates its stored hash on every redeem). But the
+// statusline runs as a FRESH process every ~1s tick (refreshInterval:1), across every Claude Code
+// session sharing this one token file. Near expiry, multiple overlapping ticks would each read the
+// SAME refresh token and redeem it in parallel — one wins, the rest get invalid_grant, and if their
+// writes interleave the file is left holding a dead token → the client silently falls to the
+// anonymous sentinel feed FOREVER (house-only, never earns) until a manual re-login. An OS-atomic
+// O_EXCL lockfile guarantees only ONE process refreshes at a time; the others keep using the
+// still-valid access token (it does not actually expire until msLeft <= 0). A crashed holder can't
+// wedge us shut: a lock older than LOCK_STALE_MS is reclaimed. Real wall-clock (Date.now) is used
+// for staleness — it tracks the lockfile's real mtime, independent of the injectable token clock.
+const LOCK_STALE_MS = 15_000; // > FETCH_TIMEOUT_MS (3s); reclaim a lock abandoned by a dead tick
+
+function acquireRefreshLock(lockFile) {
+  try { closeSync(openSync(lockFile, 'wx')); return true; } // atomic create-if-absent
+  catch {
+    try {
+      if (Date.now() - statSync(lockFile).mtimeMs > LOCK_STALE_MS) {
+        try { unlinkSync(lockFile); } catch { /* someone else reclaimed it first */ }
+        try { closeSync(openSync(lockFile, 'wx')); return true; } catch { return false; }
+      }
+    } catch { /* lock vanished between calls — treat as still-held; caller skips this tick */ }
+    return false;
+  }
+}
+function releaseRefreshLock(lockFile) { try { unlinkSync(lockFile); } catch { /* already gone */ } }
+
 // --- hot path: a valid access token, or null (anonymous) ------------------------------
-// Never throws — a logged-out install, an expired token with no usable refresh, or any network
-// error all resolve to null so the statusline cleanly falls back to the anonymous sentinel feed
-// (gross=0). Refreshes (and rotates the refresh token) only inside the skew window.
+// Never throws. Resolves to null ONLY when there is genuinely no usable credential (logged out, or
+// an expired access token with no working refresh) — then the statusline cleanly runs the anonymous
+// sentinel feed (gross=0). A still-valid access token is ALWAYS returned rather than dropped to
+// anonymous, even if a refresh attempt fails, so a transient refresh error never spuriously logs the
+// publisher out mid-session. Refreshes (rotating the single-use refresh token) happen under a lock so
+// concurrent ticks/sessions cannot burn the token in a race (see acquireRefreshLock).
 export async function getValidAccessToken({
   file = DEVICE_TOKEN, now = Date.now(), fetchImpl = fetch, authBase = AUTH_BASE,
   skewMs = TOKEN_REFRESH_SKEW_MS, timeoutMs = FETCH_TIMEOUT_MS,
@@ -103,13 +136,29 @@ export async function getValidAccessToken({
   if (msLeft > skewMs) return t.access_token;          // comfortably valid — no network
   if (!t.refresh_token) return msLeft > 0 ? t.access_token : null; // can't refresh; use if still valid
 
+  // Needs a refresh. Serialize so only one process redeems the single-use token.
+  const lockFile = `${file}.lock`;
+  if (!acquireRefreshLock(lockFile)) {
+    return msLeft > 0 ? t.access_token : null;          // another tick is refreshing — don't race it
+  }
   try {
-    const { ok, data } = await postJson(fetchImpl, `${authBase}/device/refresh`, { refresh_token: t.refresh_token }, { timeoutMs });
-    if (!ok || !data?.access_token) return null;
-    const next = shapeToken(data, now, t);
+    // Re-read under the lock: a process that held it just before us may have already refreshed.
+    const cur = loadToken(file) ?? t;
+    const curExp = cur.exp ?? decodeJwtExp(cur.access_token);
+    const curLeft = curExp != null ? curExp * 1000 - now : -1;
+    if (curLeft > skewMs) return cur.access_token;      // someone already refreshed — use the new token
+    if (!cur.refresh_token) return curLeft > 0 ? cur.access_token : null;
+
+    const { ok, data } = await postJson(fetchImpl, `${authBase}/device/refresh`, { refresh_token: cur.refresh_token }, { timeoutMs });
+    if (!ok || !data?.access_token) return curLeft > 0 ? cur.access_token : null; // rejected; use current if still valid
+    const next = shapeToken(data, now, cur);
     saveToken(file, next);
     return next.access_token;
-  } catch { return null; }                              // hot path never throws
+  } catch {
+    return msLeft > 0 ? t.access_token : null;          // hot path never throws; keep using a valid token
+  } finally {
+    releaseRefreshLock(lockFile);
+  }
 }
 
 // --- login (RFC 8628 device-code) -----------------------------------------------------
