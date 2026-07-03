@@ -16,6 +16,10 @@ credited. What remains is **volume + time**: accrue enough to clear Stripe's min
 
 Milestones: **M0–M4 DONE. M5 ~85% — first charge + first payout remain.**
 
+**Parallel work:** M5's remainder is a time-gated wait, so a **second session can execute M6 in
+parallel** — see **`docs/ops/M6_KICKOFF.md`** (safe read-only/docs slice now; money-path + load-test
+items deferred until M5 validates; prod stays single-owner = M5's).
+
 ---
 
 ## What is DONE (this session)
