@@ -12,6 +12,15 @@ been charged.** Remaining to close M5: gate 15 = Degen's payment method (live `/
 generated + sent to the advertiser) + creative activation → first cleared impression → first real
 charge (M5-T3); then first real payout (M5-T4, ≈7–10 days). All other gates green + T7 risk-accepted.**
 
+**Update 2026-07-03 (GO-LIVE session): billing PROVEN live.** First Degen paid impression credited
+(window `73061220…`, €0.05 provisional — CPVA bills per attention-second, ~€0.05 per full 5s view).
+36 house windows credited in 2h (pipeline works). Ledger booked only after the 72h clawback
+(`clear_events` hourly cron). **Two client bugs fixed + shipped `lumaline@0.1.3`:** the refresh-token
+race (overlapping ticks burned the single-use token → silent anonymous/house-only; O_EXCL lock fix)
+and the view-only dead click-URL (feed `has_dest` gate). Degen `line_item.weight` temporarily 1000
+(owner-authorized, force first credit) — **revert to 1 post-charge.** **▶ See `docs/ops/HANDOFF.md`
+for the next-session entry point.**
+
 | # | Gate | Status | Evidence |
 |---|------|--------|----------|
 | 1 | Publisher legal signed (ToS §7 payouts) | ✅ | `publisher-tos.md` v1.1 IN FORCE 2026-07-01, PR #9 owner-merged |

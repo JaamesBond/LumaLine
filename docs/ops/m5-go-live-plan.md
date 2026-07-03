@@ -4,17 +4,23 @@ The exact, ordered path from where we are now to real money flowing, with owner-
 ownership and a verification per step. Companion: `docs/ops/go-live-checklist.md` (the gate
 evidence) — this doc is the *sequence*; that one is the *preconditions*.
 
-**State now (verified 2026-07-03):** main `c44c66a`, `node --test` 339/0-fail. Remote: 31
-migrations (all applied, incl. the July-3 pair), client `lumaline@0.1.2` published.
-Checklist 16/17 green + T7 owner-risk-accepted. Advertiser **Degen** seeded (draft /
-pending_review, CPVA €0.01/view, €5/3-day, no card, not active).
+> **▶ NEXT SESSION: read `docs/ops/HANDOFF.md` first — it is the single entry point.** This doc is
+> the historical sequence; HANDOFF has the current state + exact next actions.
 
-**One gap found this session:** the `billing` edge fn on remote is **stale** (v6, 2026-06-30,
-pre-M5) — the deployed copy hardcodes the Stripe test card and has no `/setup-link` (probe:
-`/setup-link` → 404). Parallel sessions redeployed `lumaline-feed`/`auth-device` but missed
-`billing`. It must be redeployed before the swap. All other fns are current
-(`lumaline-feed` v19, `auth-device` v11, `monitor` v3 with `billing_stalled`, `stripe-connect`
-v9, `admin-booking` v7, `click` v13).
+**State now (2026-07-03, GO-LIVE session):** **LumaLine is LIVE.** Swap done (Vault Stripe secrets
+live, digest-verified); advertiser **Degen** has a live card + is `active` + serving to the owner
+publisher; **billing proven** (first Degen paid impression credited, €0.05 provisional); client
+**`lumaline@0.1.3`** shipped (refresh-race fix + view-only click-URL fix). Phase A ✅, Phase B ✅,
+**Phase C (first charge) in progress**, Phase D (payout) pending.
+
+- **Phase A — DONE.** `billing` redeployed (M5 live-PM + `/setup-link`); all 8 fns current
+  (`lumaline-feed` **v21** with the has_dest fix, `billing`, `auth-device` v11, `monitor` v3,
+  `stripe-connect` v9, `admin-booking` v7, `click` v13).
+- **Phase B — DONE.** Swap applied + confirmed; post-swap monitor all-green; nothing charged.
+- **Phase C — IN PROGRESS.** C1–C4 done (setup-link → card → activate → serving + first credit).
+  **C5 remaining:** accrue ≥~€0.50 → clear 72h (or authorized early-clear) → dry-run → real charge →
+  reconcile. Degen `line_item.weight` is temporarily **1000** (owner-authorized, to force the first
+  credit) — **revert to 1** after the charge test.
 
 ---
 
