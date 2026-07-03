@@ -5,10 +5,12 @@
 close. Verified mechanically where possible; evidence per item. Last verified: 2026-07-02.
 Final go/no-go signature = owner.
 
-**Status 2026-07-03: 16/17 green + T7 owner-risk-accepted. Row 15's advertiser ("Degen",
-view-only CPVA) is SEEDED but not complete — it still needs a payment method (`/billing/setup-link`,
-LIVE) + creative activation, both post-swap. So the swap can proceed as the enabling step, with
-the first real charge (M5-T3) following once the card is on file and the ad serves + clears.**
+**🟢 LIVE as of 2026-07-03 — THE SWAP IS DONE.** Vault `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET`
+are live (confirmed by digest match); post-swap monitor run all-7-green (`billing_recon_drift`
+flipped FAIL→PASS = now reconciling the live account); charges + payouts enabled. **Nothing has
+been charged.** Remaining to close M5: gate 15 = Degen's payment method (live `/billing/setup-link`
+generated + sent to the advertiser) + creative activation → first cleared impression → first real
+charge (M5-T3); then first real payout (M5-T4, ≈7–10 days). All other gates green + T7 risk-accepted.**
 
 | # | Gate | Status | Evidence |
 |---|------|--------|----------|
@@ -26,7 +28,7 @@ the first real charge (M5-T3) following once the card is on file and the ad serv
 | 12 | Live restricted key valid + minimal perms | ✅ | Leaked first key ROLLED by owner 2026-07-02; replacement verified same day: all read probes 200, `charges_enabled=true payouts_enabled=true` (RO/EUR), customers:write probe OK (create+delete). Key lives only in `.env` `STRIPE_SECRET_KEY_LIVE` |
 | 13 | Connect **live** platform profile complete | ✅ | Owner confirmed 2026-07-03 ("all up and running"); consistent with the API probe (`payouts_enabled=true`, account fully activated) |
 | 14 | LIVE webhook endpoints created + secrets staged | ✅ | Created 2026-07-02 (owner-named action, post-rotation key): connected `we_1ToexiCChUMF5SBO8AMAFzgG` (`account.updated`) + platform `we_1ToexiCChUMF5SBOXzth2wQT` (`transfer.reversed`,`transfer.canceled`) → `…/stripe-connect/webhook`. Signing secrets staged comma-split in `.env` `STRIPE_WEBHOOK_SECRET_LIVE` (same multi-secret format the fn verifies); enter Vault only at the gated swap |
-| 15 | ≥1 REAL advertiser: contract + KYC + creative + budget + bid>0 + payment method | 🟡 SEEDED, not complete | **Advertiser "Degen" SEEDED 2026-07-03** (`is_house=false`, advertiser `4779db17…`): view-only CPVA (no landing URL, so the earlier Rickroll bait-and-switch concern is moot), bid **€0.01/view** (`cpva_bid_micros=10000`), budget **€5 / 3-day flight** (daily auto-derived), creative `"Share degeneracy with your friends fun and easy"` in `pending_review`; campaign + line_item in `draft`. **Nothing active → cannot serve or bill pre-swap.** Still required to complete the gate: (a) **payment method** — `/billing/setup-link` in LIVE mode → friend enters their own card; (b) **activate** the creative/line_item. Both are post-swap. KYC/contract = owner-offline. Ad text is thin — owner may refine before activation. |
+| 15 | ≥1 REAL advertiser: contract + KYC + creative + budget + bid>0 + payment method | 🟡 SEEDED, not complete | **Advertiser "Degen" SEEDED 2026-07-03** (`is_house=false`, advertiser `4779db17…`): view-only CPVA (no landing URL, so the earlier Rickroll bait-and-switch concern is moot), bid **€0.01/view** (`cpva_bid_micros=10000`), budget **€5 / 3-day flight** (daily auto-derived), creative `"Share degeneracy with your friends fun and easy"` in `pending_review`; campaign + line_item in `draft`. **Nothing active → cannot serve or bill pre-swap.** Still required to complete the gate: (a) **payment method** — live `/billing/setup-link` **generated 2026-07-03** (`cs_live_…` Checkout setup session, sent to the advertiser; awaiting card entry, no charge); (b) **activate** the creative/line_item (after owner OKs the ad text). KYC/contract = owner-offline. Ad text is thin — owner may refine before activation. |
 | 16 | New money-path code adversarially reviewed | ✅ | 2026-07-02: money-safety lens (multi-agent) → 4 findings, all fixed (`8862da9`, `ef4d9e2`): terminal-skip revenue loss (HIGH), drift-dedup alert swallowing, monitor blindness to the no-PM stall, false auto-resolve. Correctness/security/integration lenses reviewed inline with live-stack verification after the agent pool hit a session limit |
 | 17 | Test suite green | ✅ | 2026-07-03: `node --test` **339 tests / 292 pass / 0 fail / 47 skipped** (grew from 324 with the dwell-latency + client-window fixes) |
 | 18 | **All edge fns current on remote** (added 2026-07-03) | ✅ | `billing` REDEPLOYED 2026-07-03 (owner-approved) — admin-authed `/setup-link` probe flipped **404 → 400** (`advertiser_id is required`), confirming the M5 live-mode code (`choosePaymentMethod` guard + `/setup-link` + retryable no-PM skip) is live. Safe: still test mode (`STRIPE_SECRET_KEY=sk_test` until the swap). All 7 fns now match `main`: `billing`, `lumaline-feed` v19, `auth-device` v11, `monitor` v3 (has `billing_stalled`), `stripe-connect` v9, `admin-booking` v7, `click` v13. |
