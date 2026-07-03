@@ -182,7 +182,7 @@ Deno.serve(async (req) => {
 
     let rpc: Record<string, unknown>;
     try { rpc = JSON.parse(text); } catch { return json({ error: "bad rpc reply" }, 502); }
-    const ad = (rpc.ad ?? {}) as { line?: string; label?: string; house?: boolean };
+    const ad = (rpc.ad ?? {}) as { line?: string; label?: string; house?: boolean; has_dest?: boolean };
     // No-fill: never fabricate a line. The client treats a missing adData as verify_fail and
     // shows its plain base status. (Our seed always fills, so this is a defensive branch.)
     if (ad.house || !ad.line) return json({ error: "no fill" }, 503);
@@ -197,7 +197,12 @@ Deno.serve(async (req) => {
     const dest = Deno.env.get("LUMALINE_SELFPROMO_DEST") ?? "https://lumaline.dev";
     const clickBase = Deno.env.get("LUMALINE_CLICK_BASE") ?? "https://c.lumaline.dev";
     const token = rpc.click_token as string | undefined;
-    const clickUrl = token ? `${clickBase}/c/${token}` : dest;
+    // View-only creatives (no booked dest_url) must NOT surface a click URL. window_open mints a
+    // token unconditionally, but resolving c.lumaline.dev/c/<token> for a destination-less creative
+    // 404s — and the client would render that as a dead inline link (worse in terminals where the
+    // OSC-8 hyperlink is stripped, so the raw URL shows as text). Emit a clickUrl ONLY when the
+    // creative actually has a destination (has_dest); otherwise null → the client shows no URL.
+    const clickUrl = ad.has_dest ? (token ? `${clickBase}/c/${token}` : dest) : null;
     // Build the signed string ONCE and transport it verbatim. JSON.parse(adData).windowId
     // MUST equal windowId or the client refuses (window.mjs:41).
     const adData = JSON.stringify({ windowId, line: ad.line, label: ad.label ?? "sponsored", clickUrl });
