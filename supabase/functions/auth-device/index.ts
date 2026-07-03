@@ -364,11 +364,10 @@ function activatePage(): string {
   </div>
   <div id="step-email" class="row">
     <label>Your email<br/><input id="email" type="email" placeholder="you@example.com" autocomplete="email"/></label>
-    <button id="send">Email me a sign-in code</button>
+    <button id="send">Email me a sign-in link</button>
   </div>
-  <div id="step-otp" class="row" hidden>
-    <label>Sign-in code (check your email)<br/><input id="otp" inputmode="numeric" autocomplete="one-time-code"/></label>
-    <button id="verify">Verify &amp; approve device</button>
+  <div id="step-approve" class="row" hidden>
+    <button id="approve-btn">Approve this device</button>
   </div>
   <div id="msg" class="muted"></div>
 
@@ -382,17 +381,9 @@ function activatePage(): string {
   const $ = (id) => document.getElementById(id);
   const msg = (t) => { $('msg').textContent = t; };
   const qp = new URLSearchParams(location.search);
+  // Device code comes from the URL (?user_code=) or, after the email round-trip, from localStorage.
   if (qp.get('user_code')) $('code').value = qp.get('user_code');
-
-  $('send').onclick = async () => {
-    const email = $('email').value.trim();
-    if (!email) return msg('Enter your email.');
-    msg('Sending…');
-    const { error } = await sb.auth.signInWithOtp({ email });
-    if (error) return msg('Could not send code: ' + error.message);
-    $('step-email').hidden = true; $('step-otp').hidden = false;
-    msg('Check your email for a 6-digit code, then enter it above.');
-  };
+  else { try { const c = localStorage.getItem('ll_user_code'); if (c) $('code').value = c; } catch (e) {} }
 
   async function approve() {
     const code = $('code').value.trim();
@@ -402,23 +393,39 @@ function activatePage(): string {
     if (ep.error) return msg('Could not set up your publisher account: ' + ep.error.message);
     const ap = await sb.rpc('device_code_approve', { p_user_code: code });
     if (ap.error) return msg('Approval error: ' + ap.error.message);
-    if (ap.data && ap.data.ok) msg('✓ Device approved. Return to your terminal — it will finish automatically.');
+    if (ap.data && ap.data.ok) { try { localStorage.removeItem('ll_user_code'); } catch (e) {} msg('✓ Device approved. Return to your terminal — it will finish automatically.'); }
     else msg('Could not approve: ' + ((ap.data && ap.data.reason) || 'unknown') + '. The code may have expired; restart lumaline login.');
   }
 
-  $('verify').onclick = async () => {
-    const token = $('otp').value.trim();
+  $('send').onclick = async () => {
     const email = $('email').value.trim();
-    msg('Verifying…');
-    const { error } = await sb.auth.verifyOtp({ email, token, type: 'email' });
-    if (error) return msg('Verification failed: ' + error.message);
-    await approve();
+    const code = $('code').value.trim();
+    if (!email) return msg('Enter your email.');
+    if (!code) return msg('Enter the device code shown in your terminal first.');
+    try { localStorage.setItem('ll_user_code', code); } catch (e) {}
+    msg('Sending…');
+    // This project's email sends a magic LINK (free-tier default sender, no code). Send the user
+    // back HERE with the device code so approval finishes automatically after they click it.
+    const redirect = location.origin + location.pathname + '?user_code=' + encodeURIComponent(code);
+    const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: redirect } });
+    if (error) return msg('Could not send email: ' + error.message);
+    $('step-email').hidden = true;
+    msg('Check your email and click the sign-in link — it returns here and approves your terminal automatically.');
   };
 
-  // If already signed in (returning visitor), skip straight to approval.
-  sb.auth.getSession().then(({ data }) => {
-    if (data.session) { $('step-email').hidden = true; $('step-otp').hidden = true; msg('Signed in. Enter the device code and it will approve automatically.'); $('code').onchange = approve; }
-  });
+  $('approve-btn').onclick = approve;
+
+  // Clicking the magic link returns here with a session. Approve once — automatically when the code
+  // is known, otherwise reveal the manual Approve button. Guarded so it runs at most once.
+  let handled = false;
+  async function onSession(session) {
+    if (handled || !session) return; handled = true;
+    $('step-email').hidden = true;
+    if ($('code').value.trim()) { msg('Signed in — approving your device…'); await approve(); }
+    else { $('step-approve').hidden = false; msg('Signed in. Enter the device code from your terminal, then Approve.'); }
+  }
+  sb.auth.onAuthStateChange((_e, session) => { if (session) onSession(session); });
+  sb.auth.getSession().then(({ data }) => { if (data.session) onSession(data.session); });
 </script>
 </body></html>`;
 }
