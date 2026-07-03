@@ -3,7 +3,7 @@
 // no network: fetch + clock are injected, the token file lives under a mkdtemp dir.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, existsSync, statSync, readFileSync } from 'node:fs';
+import { mkdtempSync, existsSync, statSync, readFileSync, writeFileSync, utimesSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -93,15 +93,69 @@ test('getValidAccessToken: refreshes (and rotates) when within the skew window',
   assert.equal(saved.refresh_token, 'refresh-NEW', 'rotated refresh token persisted');
 });
 
-test('getValidAccessToken: returns null (never throws) when refresh fails', async () => {
+test('getValidAccessToken: a failed refresh keeps using the STILL-VALID access token (no spurious anonymous)', async () => {
   const f = tmp();
   const nowS = 1_700_000_000;
-  saveToken(f, tokenObj(nowS + 60));
+  const obj = tokenObj(nowS + 60);          // 60s left — inside skew, but NOT yet expired
+  saveToken(f, obj);
   const tok = await getValidAccessToken({
     file: f, now: nowS * 1000, skewMs: 300_000, authBase: 'https://x/auth-device',
     fetchImpl: async () => { throw new Error('network down'); },
   });
-  assert.equal(tok, null, 'degrades to anonymous instead of throwing on the hot path');
+  assert.equal(tok, obj.access_token, 'a transient refresh failure must NOT drop a valid session to anonymous');
+});
+
+test('getValidAccessToken: null (anonymous) only once the token is EXPIRED and refresh fails', async () => {
+  const f = tmp();
+  const nowS = 1_700_000_000;
+  saveToken(f, tokenObj(nowS - 10));        // already expired
+  const tok = await getValidAccessToken({
+    file: f, now: nowS * 1000, skewMs: 300_000, authBase: 'https://x/auth-device',
+    fetchImpl: async () => ({ ok: false, status: 400, json: async () => ({ error: 'invalid_grant' }) }),
+  });
+  assert.equal(tok, null, 'expired token + dead refresh → anonymous (never throws)');
+});
+
+test('getValidAccessToken: concurrent ticks redeem the single-use refresh token exactly ONCE (lock)', async () => {
+  const f = tmp();
+  const nowS = 1_700_000_000;
+  const old = tokenObj(nowS + 60);          // inside skew → both calls attempt refresh
+  saveToken(f, old);
+  const newAccess = fakeJwt(nowS + 3600, { publisher_id: 'p1' });
+  let calls = 0;
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const fetchImpl = async () => {
+    calls += 1;
+    await gate;                             // hold the winner open so the loser must decide meanwhile
+    return { ok: true, status: 200, json: async () => ({ access_token: newAccess, refresh_token: 'refresh-NEW', expires_in: 3600 }) };
+  };
+  const opts = { file: f, now: nowS * 1000, skewMs: 300_000, authBase: 'https://x/auth-device', fetchImpl };
+  const p1 = getValidAccessToken(opts);     // acquires the lock, then blocks on the gate
+  const p2 = getValidAccessToken(opts);     // lock busy → must NOT call fetch
+  const r2 = await p2;
+  assert.equal(calls, 1, 'the loser did not fire a second refresh (single-use token not burned)');
+  assert.equal(r2, old.access_token, 'the loser keeps using the still-valid access token');
+  release();
+  const r1 = await p1;
+  assert.equal(r1, newAccess, 'the winner returns the freshly minted token');
+  assert.equal(loadToken(f).refresh_token, 'refresh-NEW', 'rotation persisted exactly once');
+  assert.equal(existsSync(`${f}.lock`), false, 'lock released after refresh');
+});
+
+test('getValidAccessToken: a stale lock (crashed holder) is reclaimed so refresh is not wedged shut', async () => {
+  const f = tmp();
+  const nowS = 1_700_000_000;
+  saveToken(f, tokenObj(nowS + 60));
+  const lock = `${f}.lock`;
+  writeFileSync(lock, '');                  // simulate a lock left by a dead process
+  const past = Date.now() / 1000 - 60;      // 60s old (> LOCK_STALE_MS 15s)
+  utimesSync(lock, past, past);
+  let calls = 0;
+  const fetchImpl = async () => { calls += 1; return { ok: true, status: 200, json: async () => ({ access_token: fakeJwt(nowS + 3600), refresh_token: 'refresh-NEW', expires_in: 3600 }) }; };
+  const tok = await getValidAccessToken({ file: f, now: nowS * 1000, skewMs: 300_000, authBase: 'https://x/auth-device', fetchImpl });
+  assert.equal(calls, 1, 'stale lock reclaimed and refresh proceeded');
+  assert.equal(loadToken(f).refresh_token, 'refresh-NEW');
 });
 
 test('login: device-code flow polls until approved, then persists the token', async () => {
