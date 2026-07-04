@@ -45,6 +45,11 @@ export function connectNudgeEmail({ handle, amountEur }) {
 }
 
 // Best-effort: NEVER throws. Returns 'sent' or 'failed:<reason>'.
+/**
+ * @param {{ to?: string, subject?: string, html?: string, text?: string, apiKey?: string,
+ *   from?: string, fetchImpl?: typeof fetch, timeoutMs?: number }} [args]
+ * @returns {Promise<string>}
+ */
 export async function sendEmail({ to, subject, html, text, apiKey, from, fetchImpl = fetch, timeoutMs = 10000 } = {}) {
   if (!apiKey || !to) return "failed:not_configured";
   try {
