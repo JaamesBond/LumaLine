@@ -281,7 +281,13 @@ export async function connect({
     out(`✓ Bank connected — weekly payouts active (status: ${st.data.payout_status ?? 'ok'}, €1 minimum).`);
     return;
   }
-  const res = await postJson(fetchImpl, `${connectBase}/connect/onboard`, {}, { bearer: token, timeoutMs });
+  let res;
+  try {
+    res = await postJson(fetchImpl, `${connectBase}/connect/onboard`, {}, { bearer: token, timeoutMs });
+  } catch {
+    out('Could not start onboarding (network error). Try again in a moment.');
+    return;
+  }
   if (res.status === 422) { out(`Payouts aren't supported in your region yet${res.data?.error ? ': ' + res.data.error : ''}.`); return; }
   if (!res.ok || !res.data?.onboarding_url) { out(`Could not start onboarding (HTTP ${res.status}${res.data?.error ? ': ' + res.data.error : ''}).`); return; }
   out('Connect your bank to receive payouts — open this secure Stripe page:');

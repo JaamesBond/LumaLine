@@ -122,7 +122,7 @@ Notes:
   - Uses only the official statusLine mechanism. No bundle patching.
   - Wiring happens ONLY when you run \`install\` — never automatically on npm install.
   - Login is opt-in: before it, the line runs anonymously and is never billed.
-    Earnings accrue after login but real payouts begin only at the production go-live.
+    Earnings accrue after login; run \`lumaline connect\` to receive automatic weekly payouts (€1 minimum).
   - \`login\` registers a device label (defaults to your machine hostname; \`--label <name>\` to override).
   - Disable clickable links: LUMALINE_HYPERLINKS=0`);
 }
