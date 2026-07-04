@@ -40,3 +40,8 @@ test('sendEmail: missing apiKey/to → failed:not_configured, no throw', async (
   const r = await sendEmail({ to: '', subject: 's', html: 'h', text: 't', apiKey: '', from: 'f' });
   assert.equal(r, 'failed:not_configured');
 });
+
+test('sendEmail: no arguments → failed:not_configured, no throw', async () => {
+  const r = await sendEmail();
+  assert.equal(r, 'failed:not_configured');
+});

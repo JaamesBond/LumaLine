@@ -45,13 +45,14 @@ export function connectNudgeEmail({ handle, amountEur }) {
 }
 
 // Best-effort: NEVER throws. Returns 'sent' or 'failed:<reason>'.
-export async function sendEmail({ to, subject, html, text, apiKey, from, fetchImpl = fetch }) {
+export async function sendEmail({ to, subject, html, text, apiKey, from, fetchImpl = fetch, timeoutMs = 10000 } = {}) {
   if (!apiKey || !to) return "failed:not_configured";
   try {
     const resp = await fetchImpl("https://api.resend.com/emails", {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
       body: JSON.stringify({ from, to: [to], subject, html, text }),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     return resp.ok ? "sent" : `failed:${resp.status}`;
   } catch (err) {
