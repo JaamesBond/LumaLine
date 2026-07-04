@@ -370,17 +370,19 @@ test('T22 — billing: house advertiser entry is skipped (status=skipped, reason
 });
 
 // ---------------------------------------------------------------------------
-// T23: Below-minimum entry produces status='skipped'.
+// T23: A below-minimum AGGREGATE is a NON-TERMINAL skip (since the per-advertiser aggregation).
 //
-// Setup: synthetic cleared impression with gross_micros=100 (1 cent — below $0.50).
-// Uses DEV_LINE_ITEM_ID (non-house advertiser) so only the minimum check fires.
+// A €0.05/view advertiser can never reach Stripe's 50-cent minimum per impression, so a
+// sub-minimum advertiser total must NOT get a terminal skip row (that would exclude it from the
+// uncharged view forever, stranding the €). Instead it writes NO row and STAYS in the view to keep
+// accumulating. Setup: a single 1-cent entry under DEV → its advertiser total is below the minimum.
 // ---------------------------------------------------------------------------
-test('T23 — billing: below-minimum entry is skipped (status=skipped, reason=below_stripe_minimum)', {
+test('T23 — billing: below-minimum aggregate is skipped NON-terminally (no row, stays in the view)', {
   skip: SKIP_NO_STACK || SKIP_NO_MIGRATION || SKIP_NO_FN,
 }, async () => {
   let impressionId, groupId;
   try {
-    // Gross = 1 cent (10,000 micros) — below Stripe's $0.50 minimum.
+    // Gross = 1 cent (10,000 micros) — below Stripe's €0.50 minimum, and no other DEV entry.
     const entry = await insertSyntheticBillingEntry({
       lineItemId:   DEV_LINE_ITEM_ID,
       publisherId:  PUB_A_PUBLISHER_ID,
@@ -396,20 +398,23 @@ test('T23 — billing: below-minimum entry is skipped (status=skipped, reason=be
     const body = await res.json();
     assert.equal(res.status, 200, `billing charge failed: ${JSON.stringify(body)}`);
 
+    // NON-terminal: NO advertiser_charges row is written for a below-minimum aggregate.
     const chargeRes = await svcReq('GET', 'advertiser_charges', {
-      query: `entry_group_id=eq.${groupId}&select=entry_group_id,status,failure_reason,amount_cents`,
+      query: `entry_group_id=eq.${groupId}&select=entry_group_id,status`,
     });
     assert.ok(
-      Array.isArray(chargeRes.data) && chargeRes.data.length === 1,
-      `Expected 1 advertiser_charges row, got: ${JSON.stringify(chargeRes.data)}`,
+      Array.isArray(chargeRes.data) && chargeRes.data.length === 0,
+      `below-minimum aggregate must write NO charge row (stays billable), got: ${JSON.stringify(chargeRes.data)}`,
     );
-    const row = chargeRes.data[0];
-    assert.equal(row.status, 'skipped', 'below-minimum entry must produce status=skipped');
-    assert.equal(
-      row.failure_reason, 'below_stripe_minimum',
-      'below-minimum entry must record failure_reason=below_stripe_minimum',
+
+    // And the group REMAINS in the uncharged view so it keeps accumulating toward the minimum.
+    const viewRes = await svcReq('GET', 'uncharged_advertiser_billings', {
+      query: `entry_group_id=eq.${groupId}&select=entry_group_id`,
+    });
+    assert.ok(
+      Array.isArray(viewRes.data) && viewRes.data.length === 1,
+      'below-minimum group must stay in uncharged_advertiser_billings for future aggregation',
     );
-    assert.equal(row.amount_cents, 1, 'amount_cents must match: 10000 micros = 1 cent');
   } finally {
     if (impressionId && groupId) {
       await cleanupSyntheticEntry({ impressionId, groupId });
