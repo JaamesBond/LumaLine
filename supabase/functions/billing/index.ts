@@ -48,7 +48,14 @@ import {
   SERVICE_ROLE_KEY,
 } from "../_shared/jwt.ts";
 import Stripe from "https://esm.sh/stripe@14.21.0?target=deno";
-import { choosePaymentMethod, isLiveKey } from "../_shared/billing-logic.mjs";
+import {
+  choosePaymentMethod,
+  isLiveKey,
+  microsToCents,
+  batchIdempotencyKey,
+  planAdvertiserCharges,
+  partitionPendingByBatch,
+} from "../_shared/billing-logic.mjs";
 
 const billingCors = {
   ...corsHeaders,
@@ -69,6 +76,18 @@ function jsonErr(message: string, status: number, detail?: unknown): Response {
     status,
     headers: { ...billingCors, "content-type": "application/json" },
   });
+}
+
+// Build the /charge response with an honest per-outcome breakdown. `charged` = actual successful
+// charges (not results.length); new clients should read `counts` (which sums to `processed`).
+function billingResponse(results: Record<string, unknown>[], dryRun: boolean): Response {
+  const counts = {
+    succeeded:    results.filter((r) => r.status === "succeeded").length,
+    skipped:      results.filter((r) => r.status === "skipped").length,
+    failed:       results.filter((r) => r.status === "failed").length,
+    would_charge: results.filter((r) => r.would_charge === true).length,
+  };
+  return jsonOk({ charged: counts.succeeded, processed: results.length, counts, dry_run: dryRun, results });
 }
 
 // Service-role REST helper — bypasses RLS, same pattern as admin-booking.
@@ -203,17 +222,6 @@ async function resolvePaymentMethod(
   });
 }
 
-// Convert micro-EUR to Stripe cents (LumaLine operates in EUR — RO/EUR Stripe entity).
-// 1 EUR = 1,000,000 micro-EUR = 100 cents → 1 cent = 10,000 micro-EUR.
-export function microsToCents(micros: number): number {
-  return Math.round(micros / 10000);
-}
-
-// Idempotency key for a billing group — stable across re-runs of the billing cycle.
-export function idempotencyKey(entryGroupId: string): string {
-  return `lumaline_grp_${entryGroupId}`;
-}
-
 interface ChargeRow {
   entry_group_id: string;
   advertiser_id: string;
@@ -257,6 +265,240 @@ async function insertCharge(row: ChargeRow): Promise<void> {
   }
 }
 
+// ---- Aggregate-charge helpers (per-advertiser billing) ----------------------
+// Reserve a plan's groups as `pending` advertiser_charges rows. This removes them from the
+// uncharged view (ac.entry_group_id IS NULL) so a concurrent/next run cannot re-select them.
+// on_conflict → ignore-duplicates: a group already reserved/charged by a prior run is untouched.
+type PendingGroup = { entry_group_id: string; amount_micros: number; impression_id: string | null };
+
+// Reserve a set of groups under ONE stable charge_batch_id (claiming them out of the uncharged
+// view). on_conflict=entry_group_id → ignore-duplicates: a group already reserved/charged by another
+// batch is left in its owning batch, so each group belongs to exactly one batch (per-group claiming
+// = the concurrency guard) and the batch membership is frozen for its stable idempotency key.
+async function reservePending(
+  groups: PendingGroup[],
+  advertiserId: string,
+  batchId: string,
+): Promise<void> {
+  if (groups.length === 0) return;
+  const rows = groups.map((g) => ({
+    entry_group_id:  g.entry_group_id,
+    advertiser_id:   advertiserId,
+    impression_id:   g.impression_id,
+    amount_micros:   g.amount_micros,
+    amount_cents:    microsToCents(g.amount_micros),
+    status:          "pending",
+    charge_batch_id: batchId,
+    attempted_at:    new Date().toISOString(),
+  }));
+  await svc("POST", "advertiser_charges", {
+    body:   rows,
+    query:  "on_conflict=entry_group_id",
+    prefer: "return=minimal,resolution=ignore-duplicates",
+  });
+}
+
+// The AUTHORITATIVE set for a batch: its own reserved-but-unsettled rows. A batch never sees another
+// batch's groups, so its idempotency key (batchIdempotencyKey) is immutable across retries/recovery.
+async function reselectByBatch(batchId: string): Promise<PendingGroup[]> {
+  const res = await svc("GET", "advertiser_charges", {
+    query:
+      `charge_batch_id=eq.${batchId}&status=eq.pending&stripe_charge_id=is.null` +
+      `&select=entry_group_id,amount_micros,impression_id&limit=1000`,
+  });
+  return res.ok && Array.isArray(res.data) ? (res.data as PendingGroup[]) : [];
+}
+
+// Release reserved-but-not-charged rows back to the uncharged view (delete the pending rows). Used
+// ONLY before any PaymentIntent exists for the batch (sub-minimum / house), never after a charge.
+async function releaseBatch(entryGroupIds: string[]): Promise<void> {
+  if (entryGroupIds.length === 0) return;
+  await svc("DELETE", "advertiser_charges", {
+    query:  `entry_group_id=in.(${entryGroupIds.join(",")})&status=eq.pending&stripe_charge_id=is.null`,
+    prefer: "return=minimal",
+  });
+}
+
+// Promote a batch's reserved rows onto a succeeded PaymentIntent. Filtered on status=eq.pending so it
+// only ever settles rows still reserved (never overwrites a succeeded/failed row).
+async function markPendingCharged(
+  entryGroupIds: string[],
+  stripeChargeId: string,
+  customerId: string,
+): Promise<void> {
+  if (entryGroupIds.length === 0) return;
+  await svc("PATCH", "advertiser_charges", {
+    body: {
+      status: "succeeded", stripe_charge_id: stripeChargeId,
+      stripe_customer_id: customerId, attempted_at: new Date().toISOString(),
+    },
+    query:  `entry_group_id=in.(${entryGroupIds.join(",")})&status=eq.pending`,
+    prefer: "return=minimal",
+  });
+}
+
+// Terminal-fail a batch's reserved rows — ONLY for a definitive decline. Ambiguous errors
+// (network/timeout, where the PI may exist) deliberately leave the rows pending so a recovery run
+// retries idempotently with the SAME batch key.
+async function markPendingFailed(entryGroupIds: string[], reason: string): Promise<void> {
+  if (entryGroupIds.length === 0) return;
+  await svc("PATCH", "advertiser_charges", {
+    body:   { status: "failed", failure_reason: reason, attempted_at: new Date().toISOString() },
+    query:  `entry_group_id=in.(${entryGroupIds.join(",")})&status=eq.pending`,
+    prefer: "return=minimal",
+  });
+}
+
+interface AdvertiserPlan {
+  advertiser_id: string;
+  advertiser_name: string | null;
+  stripe_customer_id: string | null;
+  groups: PendingGroup[];
+}
+interface BatchAdvertiser {
+  advertiser_id: string;
+  advertiser_name: string | null;
+  stripe_customer_id: string | null;
+  is_house: boolean;
+}
+
+// Settle an ALREADY-RESERVED batch onto ONE PaymentIntent, using an already-resolved customer + PM.
+// Idempotency key = batchIdempotencyKey(batchId) (IMMUTABLE), so a crash after paymentIntents.create
+// is recovered by a later run re-issuing the SAME batch → Stripe returns the SAME PI (no double
+// charge). house / sub-minimum batches are RELEASED back to the view (never charged) BEFORE any PI.
+async function settleReservedBatch(
+  batchId: string,
+  adv: BatchAdvertiser,
+  customerId: string,
+  pm: string,
+): Promise<Record<string, unknown>> {
+  const chargeSet = await reselectByBatch(batchId);
+  if (chargeSet.length === 0) {
+    return { advertiser_id: adv.advertiser_id, status: "skipped", reason: "nothing_pending", batch_id: batchId };
+  }
+  const ids = chargeSet.map((g) => g.entry_group_id);
+
+  // TRUST INVARIANT #1 (F5): house/sentinel is never charged, even via recovery.
+  if (adv.is_house) {
+    await releaseBatch(ids);
+    return { advertiser_id: adv.advertiser_id, status: "skipped", reason: "house_advertiser", batch_id: batchId };
+  }
+
+  const sumMicros   = chargeSet.reduce((a, g) => a + Number(g.amount_micros), 0);
+  const amountCents = microsToCents(sumMicros);
+  if (amountCents < 50) {
+    // A concurrent run claimed some of this batch's intended groups → the claimed remainder is
+    // sub-minimum. Release it back to the view to re-aggregate (never leave it stranded pending).
+    await releaseBatch(ids);
+    return {
+      advertiser_id: adv.advertiser_id, status: "skipped", reason: "below_stripe_minimum",
+      amount_cents: amountCents, batch_id: batchId,
+    };
+  }
+
+  try {
+    const stripe = getStripe();
+    const intent = await stripe.paymentIntents.create(
+      {
+        amount:         amountCents,
+        currency:       "eur",
+        customer:       customerId,
+        payment_method: pm,
+        confirm:        true,
+        off_session:    true,
+        description:    `LumaLine CPVA — ${adv.advertiser_name ?? adv.advertiser_id} — ${chargeSet.length} impression(s)`,
+        metadata: {
+          source:          "lumaline",         // enables /reconcile Stripe-side filter
+          kind:            "cpva_aggregate",
+          advertiser_id:   adv.advertiser_id,
+          charge_batch_id: batchId,
+          group_count:     String(chargeSet.length),
+        },
+      },
+      { idempotencyKey: batchIdempotencyKey(batchId) },   // IMMUTABLE per batch
+    );
+
+    await markPendingCharged(ids, intent.id, customerId);
+
+    // Stamp each impression with the PI id so /refund can look it up.
+    const impIds = chargeSet.map((g) => g.impression_id).filter((x): x is string => !!x);
+    if (impIds.length > 0) {
+      await svc("PATCH", "impressions", {
+        body:   { stripe_charge_id: intent.id },
+        query:  `id=in.(${impIds.join(",")})`,
+        prefer: "return=minimal",
+      });
+    }
+
+    return {
+      advertiser_id: adv.advertiser_id, status: "succeeded", stripe_id: intent.id,
+      amount_cents: amountCents, group_count: chargeSet.length, batch_id: batchId,
+    };
+  } catch (err: unknown) {
+    const stripeErr = err as { code?: string; type?: string; message?: string };
+    const isDecline = stripeErr.code === "card_declined" || stripeErr.type === "StripeCardError";
+    const reason = stripeErr.message ?? "unknown";
+    if (isDecline) {
+      // Definitive decline → terminal-fail this batch's rows + pause. Ambiguous errors are NOT failed:
+      // leaving them pending lets recovery retry with the SAME batch key (idempotent, no double charge).
+      await markPendingFailed(ids, reason);
+      await pauseAdvertiserLineItems(adv.advertiser_id);
+    }
+    return { advertiser_id: adv.advertiser_id, status: "failed", reason, batch_id: batchId };
+  }
+}
+
+// Resolve customer + PM for an advertiser. Shared by fresh charge (pre-reserve) and recovery.
+async function resolveCustomerAndPm(
+  adv: BatchAdvertiser,
+): Promise<{ customerId: string; pm: string } | { skip: string } | { error: string }> {
+  try {
+    const stripe = getStripe();
+    const customerId = await getOrCreateStripeCustomer(
+      stripe, adv.advertiser_id, adv.advertiser_name ?? "", adv.stripe_customer_id,
+    );
+    const pmChoice = await resolvePaymentMethod(stripe, customerId);
+    if ("skip" in pmChoice) return { skip: "no_payment_method" };
+    return { customerId, pm: pmChoice.pm };
+  } catch (err: unknown) {
+    return { error: (err as { message?: string }).message ?? "unknown" };
+  }
+}
+
+// FRESH charge from a plan: resolve PM FIRST (no PM ⇒ pause + skip WITHOUT reserving, so the groups
+// stay in the view), then mint a batch, reserve, and settle.
+async function chargeFreshBatch(plan: AdvertiserPlan): Promise<Record<string, unknown>> {
+  const adv: BatchAdvertiser = {
+    advertiser_id: plan.advertiser_id, advertiser_name: plan.advertiser_name,
+    stripe_customer_id: plan.stripe_customer_id, is_house: false,
+  };
+  const resolved = await resolveCustomerAndPm(adv);
+  if ("skip" in resolved) {
+    await pauseAdvertiserLineItems(plan.advertiser_id);
+    return { advertiser_id: plan.advertiser_id, status: "skipped", reason: resolved.skip, group_count: plan.groups.length };
+  }
+  if ("error" in resolved) {
+    return { advertiser_id: plan.advertiser_id, status: "failed", reason: resolved.error };
+  }
+  const batchId = crypto.randomUUID();
+  await reservePending(plan.groups, plan.advertiser_id, batchId);
+  return await settleReservedBatch(batchId, adv, resolved.customerId, resolved.pm);
+}
+
+// RECOVERY: finish a batch a crashed prior run left reserved. Resolve PM (no PM ⇒ leave pending for a
+// later retry) and settle the SAME batch under its stable key — Stripe returns the same PI if one was
+// already created, else creates it.
+async function recoverBatch(batchId: string, adv: BatchAdvertiser): Promise<Record<string, unknown>> {
+  const resolved = await resolveCustomerAndPm(adv);
+  if ("skip" in resolved) {
+    return { advertiser_id: adv.advertiser_id, status: "skipped", reason: resolved.skip, batch_id: batchId };
+  }
+  if ("error" in resolved) {
+    return { advertiser_id: adv.advertiser_id, status: "failed", reason: resolved.error, batch_id: batchId };
+  }
+  return await settleReservedBatch(batchId, adv, resolved.customerId, resolved.pm);
+}
+
 interface UnchargedRow {
   entry_group_id:    string;
   event_type:        string;
@@ -286,216 +528,124 @@ Deno.serve(async (req) => {
   if (req.method === "POST" && path.endsWith("/charge")) {
     const dryRun = url.searchParams.get("dry_run") === "true";
 
-    // Fetch all uncharged cleared entries from the view (up to 200 per run).
+    // Fetch uncharged cleared entries (up to 500). Charges MUST aggregate per advertiser — a
+    // €0.05/view advertiser never clears Stripe's 50-cent minimum per impression.
     const viewRes = await svc("GET", "uncharged_advertiser_billings", {
-      query: "select=*&order=cleared_at.asc&limit=200",
+      query: "select=*&order=cleared_at.asc&limit=500",
     });
     if (!viewRes.ok) {
       return jsonErr("Failed to fetch uncharged billings", viewRes.status, viewRes.data);
     }
     const uncharged = (viewRes.data as UnchargedRow[]) ?? [];
+    const plans = planAdvertiserCharges(uncharged);
 
     const results: Record<string, unknown>[] = [];
 
-    for (const entry of uncharged) {
-      const amountCents = microsToCents(entry.amount_micros);
-
-      // TRUST INVARIANT #1: house/sentinel advertisers are never charged.
-      if (entry.is_house) {
-        const record = {
-          entry_group_id: entry.entry_group_id,
-          advertiser_id:  entry.advertiser_id,
-          status:         "skipped",
-          reason:         "house_advertiser",
-          amount_micros:  entry.amount_micros,
-          amount_cents:   amountCents,
-        };
-        if (!dryRun) {
-          await insertCharge({
-            entry_group_id: entry.entry_group_id,
-            advertiser_id:  entry.advertiser_id,
-            impression_id:  entry.impression_id,
-            amount_micros:  entry.amount_micros,
-            amount_cents:   amountCents,
-            status:         "skipped",
-            failure_reason: "house_advertiser",
-          });
-        }
-        results.push(record);
-        continue;
-      }
-
-      // Below Stripe minimum (€0.50 = 50 cents = 500,000 micro-EUR).
-      if (amountCents < 50) {
-        const record = {
-          entry_group_id: entry.entry_group_id,
-          advertiser_id:  entry.advertiser_id,
-          status:         "skipped",
-          reason:         "below_stripe_minimum",
-          amount_micros:  entry.amount_micros,
-          amount_cents:   amountCents,
-        };
-        if (!dryRun) {
-          await insertCharge({
-            entry_group_id: entry.entry_group_id,
-            advertiser_id:  entry.advertiser_id,
-            impression_id:  entry.impression_id,
-            amount_micros:  entry.amount_micros,
-            amount_cents:   amountCents,
-            status:         "skipped",
-            failure_reason: "below_stripe_minimum",
-          });
-        }
-        results.push(record);
-        continue;
-      }
-
-      // Dry-run: report what would be charged without hitting Stripe.
-      if (dryRun) {
-        results.push({
-          entry_group_id:   entry.entry_group_id,
-          advertiser_id:    entry.advertiser_id,
-          advertiser_name:  entry.advertiser_name,
-          amount_cents:     amountCents,
-          idempotency_key:  idempotencyKey(entry.entry_group_id),
-          would_charge:     true,
-        });
-        continue;
-      }
-
-      // ---- Real Stripe charge path ----------------------------------------
-      let customerId = entry.stripe_customer_id;
-
-      try {
-        const stripe = getStripe();
-
-        // Get or create a Stripe customer for this advertiser (persists the id).
-        customerId = await getOrCreateStripeCustomer(
-          stripe, entry.advertiser_id, entry.advertiser_name, customerId,
-        );
-
-        // Resolve the payment method: saved default > first attached card >
-        // pm_card_visa (TEST MODE ONLY — the pure helper guarantees live mode can
-        // never fall through to the test token).
-        const pmChoice = await resolvePaymentMethod(stripe, customerId);
-        if ("skip" in pmChoice) {
-          // Live mode, no saved payment method: pause the advertiser's line_items
-          // exactly like the card_declined path (no credit extension without a PM)
-          // and move on. Deliberately NO advertiser_charges row: the uncharged view
-          // excludes any group with a charges row regardless of status
-          // (ac.entry_group_id IS NULL), so inserting a 'skipped' row here would make
-          // the group PERMANENTLY unbillable — the publisher earning leg would stand
-          // while the advertiser is never charged. Leaving the group in the view means
-          // a later run charges it once the advertiser saves a PM via /setup-link.
-          // (below_stripe_minimum keeps its terminal skip-row: amounts can only be
-          // charged as a group and a sub-minimum group stays sub-minimum forever.)
-          await pauseAdvertiserLineItems(entry.advertiser_id);
+    // DRY-RUN: preview the per-advertiser plan without a lock, reserve, or Stripe call.
+    if (dryRun) {
+      for (const plan of plans) {
+        if (plan.action === "skip_house") {
+          for (const g of plan.groups) {
+            results.push({
+              entry_group_id: g.entry_group_id, advertiser_id: plan.advertiser_id,
+              status: "skipped", reason: "house_advertiser",
+              amount_micros: g.amount_micros, amount_cents: microsToCents(g.amount_micros),
+            });
+          }
+        } else if (plan.action === "skip_below_min") {
           results.push({
-            entry_group_id: entry.entry_group_id,
-            advertiser_id:  entry.advertiser_id,
-            status:         "skipped",
-            reason:         "no_payment_method",
-            amount_micros:  entry.amount_micros,
-            amount_cents:   amountCents,
+            advertiser_id: plan.advertiser_id, status: "skipped", reason: "below_stripe_minimum",
+            amount_micros: plan.sumMicros, amount_cents: plan.sumCents, group_count: plan.groups.length,
+          });
+        } else {
+          results.push({
+            advertiser_id: plan.advertiser_id, advertiser_name: plan.advertiser_name,
+            amount_cents: plan.sumCents, group_count: plan.groups.length, would_charge: true,
+          });
+        }
+      }
+      return billingResponse(results, true);
+    }
+
+    // LIVE: single-flight lock (defense-in-depth atop per-group claiming) — one billing run at a time.
+    const lockRes = await svc("POST", "rpc/billing_lock_acquire", { body: {} });
+    const lockToken = lockRes.ok && typeof lockRes.data === "string" ? lockRes.data : null;
+    if (!lockToken) {
+      return jsonOk({
+        charged: 0, processed: 0, dry_run: false, results: [], locked: true,
+        counts: { succeeded: 0, skipped: 0, failed: 0, would_charge: 0 },
+      });
+    }
+
+    try {
+      // RECOVERY: settle EVERY existing pending batch (a crashed prior run's reserved-but-unsettled
+      // rows), grouped by its stable charge_batch_id — independent of the fresh plans below, so a
+      // pending batch is never stranded by a same-advertiser skip (adversarial review F3).
+      const pendRes = await svc("GET", "advertiser_charges", {
+        query: "status=eq.pending&stripe_charge_id=is.null&select=charge_batch_id,advertiser_id,entry_group_id&limit=1000",
+      });
+      const batches = partitionPendingByBatch(
+        Array.isArray(pendRes.data)
+          ? (pendRes.data as Array<{ charge_batch_id: string | null; advertiser_id: string; entry_group_id: string }>)
+          : [],
+      );
+      for (const [batchId, batch] of batches) {
+        if (!batchId) {
+          // Legacy/malformed rows with no batch id: release to the view, never charge.
+          await releaseBatch((batch.rows as Array<{ entry_group_id: string }>).map((r) => r.entry_group_id));
+          results.push({ advertiser_id: batch.advertiser_id, status: "skipped", reason: "no_batch_id_released" });
+          continue;
+        }
+        const advRes = await svc("GET", "advertisers", {
+          query: `id=eq.${batch.advertiser_id}&select=name,stripe_customer_id,is_house&limit=1`,
+        });
+        const a = (Array.isArray(advRes.data) ? advRes.data[0] : null) as
+          | { name?: string; stripe_customer_id?: string | null; is_house?: boolean }
+          | null;
+        results.push(await recoverBatch(batchId, {
+          advertiser_id: batch.advertiser_id, advertiser_name: a?.name ?? null,
+          stripe_customer_id: a?.stripe_customer_id ?? null, is_house: a?.is_house === true,
+        }));
+      }
+
+      // MAIN: fresh plans. Their charge groups are disjoint from any recovered batch (the view
+      // excludes already-reserved groups), so no group is charged twice.
+      for (const plan of plans) {
+        if (plan.action === "skip_house") {
+          // house/sentinel is never charged (invariant #1). Terminal-skip the stray groups.
+          for (const g of plan.groups) {
+            await insertCharge({
+              entry_group_id: g.entry_group_id, advertiser_id: plan.advertiser_id,
+              impression_id: g.impression_id, amount_micros: g.amount_micros,
+              amount_cents: microsToCents(g.amount_micros), status: "skipped",
+              failure_reason: "house_advertiser",
+            });
+            results.push({
+              entry_group_id: g.entry_group_id, advertiser_id: plan.advertiser_id,
+              status: "skipped", reason: "house_advertiser",
+              amount_micros: g.amount_micros, amount_cents: microsToCents(g.amount_micros),
+            });
+          }
+          continue;
+        }
+        if (plan.action === "skip_below_min") {
+          // NON-terminal: write no row, the groups stay in the view and keep accumulating.
+          results.push({
+            advertiser_id: plan.advertiser_id, status: "skipped", reason: "below_stripe_minimum",
+            amount_micros: plan.sumMicros, amount_cents: plan.sumCents, group_count: plan.groups.length,
           });
           continue;
         }
-
-        // Create and confirm PaymentIntent.
-        // Idempotency key: stable per entry_group_id → re-runs return the same intent.
-        const intent = await stripe.paymentIntents.create(
-          {
-            amount:         amountCents,
-            currency:       "eur",
-            customer:       customerId,
-            payment_method: pmChoice.pm,
-            confirm:        true,
-            off_session:    true,
-            description:    `LumaLine impression ${entry.impression_id}`,
-            metadata: {
-              source:         "lumaline",      // enables /reconcile Stripe-side filter
-              impression_id:  entry.impression_id,
-              entry_group_id: entry.entry_group_id,
-              advertiser_id:  entry.advertiser_id,
-              publisher_id:   entry.publisher_id,
-            },
-          },
-          { idempotencyKey: idempotencyKey(entry.entry_group_id) },
-        );
-
-        await insertCharge({
-          entry_group_id:    entry.entry_group_id,
-          advertiser_id:     entry.advertiser_id,
-          impression_id:     entry.impression_id,
-          amount_micros:     entry.amount_micros,
-          amount_cents:      amountCents,
-          stripe_charge_id:  intent.id,
-          stripe_customer_id: customerId,
-          status:            "succeeded",
-        });
-
-        // Also stamp the impression with the PaymentIntent id so the /refund
-        // endpoint can look it up without joining through ledger_entries.
-        if (entry.impression_id) {
-          await svc("PATCH", "impressions", {
-            body:   { stripe_charge_id: intent.id },
-            query:  `id=eq.${entry.impression_id}`,
-            prefer: "return=minimal",
-          });
-        }
-
-        results.push({
-          entry_group_id: entry.entry_group_id,
-          status:         "succeeded",
-          stripe_id:      intent.id,
-          amount_cents:   amountCents,
-        });
-      } catch (err: unknown) {
-        const stripeErr = err as { code?: string; type?: string; message?: string };
-        const isDecline =
-          stripeErr.code === "card_declined" || stripeErr.type === "StripeCardError";
-
-        await insertCharge({
-          entry_group_id: entry.entry_group_id,
-          advertiser_id:  entry.advertiser_id,
-          impression_id:  entry.impression_id,
-          amount_micros:  entry.amount_micros,
-          amount_cents:   amountCents,
-          status:         "failed",
-          failure_reason: stripeErr.message ?? "unknown",
-        });
-
-        results.push({
-          entry_group_id: entry.entry_group_id,
-          status:         "failed",
-          reason:         stripeErr.message ?? "unknown",
-        });
-
-        // Pause all line_items for this advertiser on card decline.
-        if (isDecline) {
-          await pauseAdvertiserLineItems(entry.advertiser_id);
-        }
+        results.push(await chargeFreshBatch({
+          advertiser_id: plan.advertiser_id, advertiser_name: plan.advertiser_name,
+          stripe_customer_id: plan.stripe_customer_id, groups: plan.groups,
+        }));
       }
+    } finally {
+      await svc("POST", "rpc/billing_lock_release", { body: { p_token: lockToken } });
     }
 
-    // Split the previously-conflated total into an honest per-outcome breakdown.
-    // `charged` now means "actual successful charges" (was: results.length, which
-    // also counted skipped + failed + dry-run rows). Old clients reading a numeric
-    // `charged` still work; new clients should read `counts`.
-    const counts = {
-      succeeded:    results.filter((r) => r.status === "succeeded").length,
-      skipped:      results.filter((r) => r.status === "skipped").length,
-      failed:       results.filter((r) => r.status === "failed").length,
-      would_charge: results.filter((r) => r.would_charge === true).length,
-    };
-
-    return jsonOk({
-      charged:   counts.succeeded,
-      processed: results.length,
-      counts,
-      dry_run:   dryRun,
-      results,
-    });
+    return billingResponse(results, false);
   }
 
   // ---- GET /reconcile?from=ISO_DATE&to=ISO_DATE --------------------------------
