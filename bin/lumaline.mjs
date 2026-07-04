@@ -39,6 +39,9 @@ async function main() {
     case 'earnings':
       await (await import('../src/client/auth.mjs')).earnings();
       break;
+    case 'connect':
+      await (await import('../src/client/auth.mjs')).connect({});
+      break;
     case 'doctor':
       await doctor();
       break;
@@ -111,6 +114,7 @@ Usage:
   lumaline login        Log in (device-code) so earnings attribute to your account
   lumaline logout       Log out: revoke this device, revert to the anonymous sentinel
   lumaline earnings     Show your accrued earnings (transparent ledger)
+  lumaline connect      Connect your bank (Stripe) to receive automatic weekly payouts
   lumaline doctor       Show environment + where Claude Code config lives
   lumaline version      Print version
 
