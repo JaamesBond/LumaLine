@@ -26,12 +26,19 @@ Companions: `docs/ops/HANDOFF.md` (live M5 state + IDs + tooling), `docs/superpo
 
 ## 1. EXECUTE NOW — the safe slice (additive, read-only, zero M5 conflict)
 
-### M6-T1 — on-call runbook + read-only admin dashboard  ← start here
+> **STATUS 2026-07-04: M6-T1 + M6-T5 DONE → PR #28** (`m6/t1-dashboard-runbook`, merge-as-is into the
+> public repo per owner Option 1). Delivered: `docs/ops/oncall-runbook.md`, `scripts/ops/dashboard.mjs`,
+> `scripts/ops/lib/transparency.mjs` + `scripts/ops/transparency-report.mjs` + `docs/transparency-report.{md,json}`,
+> `test/transparency-report.test.mjs` (+12 → unit suite 241/241). Verified live read-only (zero-sum ✓,
+> report reconciles + non-PII, numbers match direct SQL). Adversarial 5-lens review clean on money/trust.
+> **Next safe, build-only step: M6-T2 load harness (build local, DO NOT run vs prod).**
+
+### M6-T1 — on-call runbook + read-only admin dashboard  ✅ DONE (PR #28)
 - **Runbook** `docs/ops/oncall-runbook.md`: executable steps for manual clawback (`public.clawback(source_type, source_id, reason)`), suspend a publisher/advertiser (status flip), emergency ledger audit (zero-sum check), key rotation, and swap rollback (restore test secrets). Reference existing RPCs/fns; mark each step owner-gated vs read-only.
 - **Read-only admin dashboard**: extend `scripts/ops/watch-billing.mjs` into a fuller read-only view — fill rate, impressions, credited views, fraud flags (`risk_flags`), rate-limit saturation (`rl_buckets`), ledger balance (zero-sum), monitor status. **Reads only** (management-API SELECT via `scripts/ops/sql.mjs` pattern).
 - **Test / acceptance:** dashboard renders real series from live reads; runbook steps are executable (read-only ones runnable now, mutating ones dry-documented). No prod writes.
 
-### M6-T5 — public transparency report
+### M6-T5 — public transparency report  ✅ DONE (PR #28)
 - **WHAT:** aggregate **non-PII** report — fill, credited views, clearing prices, publisher-share %, clawback rate — that **reconciles to the ledger**.
 - **FILES:** `scripts/ops/transparency-report.mjs` (read-only generator) + `docs/` output; later a portal page (website repo).
 - **Test / acceptance:** figures reconcile to the double-entry ledger (zero-sum); an assertion proves **no PII / no raw cost-token deltas** in the output (data-minimization invariant); numbers match direct SQL.
