@@ -148,14 +148,24 @@ test('M1 device-code login: attribution, one-shot, revocation, refresh, earnings
     assert.equal(bTry.ok, false, "publisher B's revoke does not touch A's device");
   });
 
-  await t.test('refresh rotates: the old refresh hash is invalid after one use', async () => {
+  await t.test('refresh rotates, with a grace window for the immediately-previous token', async () => {
+    // NB: since migration 20260704120000, the immediately-previous token is honored within a
+    // bounded grace (crash-mid-rotation recovery). Exhaustive coverage lives in
+    // test/device-refresh-grace.integration.mjs; here we assert the headline contract.
     const s = await loginAs(A);
-    const newRefresh = randomBytes(24).toString('base64url');
-    const r1 = await rpc('device_refresh', { p_refresh_token_hash: s.refreshHash, p_new_refresh_token_hash: sha(newRefresh) }, { jwt: SERVICE });
+    const R1 = sha(randomBytes(24).toString('base64url'));
+    const r1 = await rpc('device_refresh', { p_refresh_token_hash: s.refreshHash, p_new_refresh_token_hash: R1 }, { jwt: SERVICE });
     assert.equal(r1.status, 'ok');
     assert.equal(r1.publisher_id, A.pub);
-    const r2 = await rpc('device_refresh', { p_refresh_token_hash: s.refreshHash, p_new_refresh_token_hash: sha(randomBytes(8).toString('hex')) }, { jwt: SERVICE });
-    assert.equal(r2.status, 'invalid', 'the rotated-away hash no longer refreshes');
+    // The just-superseded token still refreshes within grace (a client killed before persisting R1 recovers).
+    const R2 = sha(randomBytes(24).toString('base64url'));
+    const grace = await rpc('device_refresh', { p_refresh_token_hash: s.refreshHash, p_new_refresh_token_hash: R2 }, { jwt: SERVICE });
+    assert.equal(grace.status, 'ok', 'the immediately-previous token recovers within the grace window');
+    // A NORMAL rotation moves prev forward; the original token is then two-back and rejected.
+    const R3 = sha(randomBytes(24).toString('base64url'));
+    await rpc('device_refresh', { p_refresh_token_hash: R2, p_new_refresh_token_hash: R3 }, { jwt: SERVICE });
+    const stale = await rpc('device_refresh', { p_refresh_token_hash: s.refreshHash, p_new_refresh_token_hash: sha('x') }, { jwt: SERVICE });
+    assert.equal(stale.status, 'invalid', 'a token older than the immediately-previous no longer refreshes');
   });
 
   await t.test('earnings views are RLS-scoped: A sees A only; B never sees A', async () => {
