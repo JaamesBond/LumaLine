@@ -8,8 +8,15 @@ set local statement_timeout = '15s';
 
 alter table public.publishers add column if not exists connect_nudge_at timestamptz;
 
+-- Defensive cleanup: earlier revisions of this migration created these three REST-called RPCs in
+-- `app`, but PostgREST only resolves the `public` schema (default profile) — POST /rest/v1/rpc/<name>
+-- 404'd with PGRST202 for all three. Drop any misplaced `app` versions before recreating in `public`.
+drop function if exists app.publisher_contact(uuid);
+drop function if exists app.payout_nudge_candidates(bigint, interval);
+drop function if exists app.mark_connect_nudged(uuid[]);
+
 -- Contact for a publisher (email + handle) from auth.users. SECDEF: crosses into the auth schema.
-create or replace function app.publisher_contact(p_publisher_id uuid)
+create or replace function public.publisher_contact(p_publisher_id uuid)
 returns table(email text, handle text)
 language sql security definer set search_path = '' as $$
   select u.email::text, p.handle
@@ -18,11 +25,11 @@ language sql security definer set search_path = '' as $$
    where p.id = p_publisher_id
    limit 1;
 $$;
-revoke all on function app.publisher_contact(uuid) from public, anon, authenticated;
-grant execute on function app.publisher_contact(uuid) to service_role;
+revoke all on function public.publisher_contact(uuid) from public, anon, authenticated;
+grant execute on function public.publisher_contact(uuid) to service_role;
 
 -- Publishers who have earned >= the minimum but have NOT onboarded a bank, not nudged in ~a week.
-create or replace function app.payout_nudge_candidates(p_min_micros bigint, p_hold interval default interval '7 days')
+create or replace function public.payout_nudge_candidates(p_min_micros bigint, p_hold interval default interval '7 days')
 returns table(publisher_id uuid, email text, handle text, payable_micros bigint)
 language plpgsql security definer set search_path = '' as $$
 begin
@@ -35,15 +42,15 @@ begin
        and app.publisher_payable_micros(p.id, p_hold) >= p_min_micros;
 end;
 $$;
-revoke all on function app.payout_nudge_candidates(bigint, interval) from public, anon, authenticated;
-grant execute on function app.payout_nudge_candidates(bigint, interval) to service_role;
+revoke all on function public.payout_nudge_candidates(bigint, interval) from public, anon, authenticated;
+grant execute on function public.payout_nudge_candidates(bigint, interval) to service_role;
 
-create or replace function app.mark_connect_nudged(p_ids uuid[])
+create or replace function public.mark_connect_nudged(p_ids uuid[])
 returns void language sql security definer set search_path = '' as $$
   update public.publishers set connect_nudge_at = now() where id = any(p_ids);
 $$;
-revoke all on function app.mark_connect_nudged(uuid[]) from public, anon, authenticated;
-grant execute on function app.mark_connect_nudged(uuid[]) to service_role;
+revoke all on function public.mark_connect_nudged(uuid[]) from public, anon, authenticated;
+grant execute on function public.mark_connect_nudged(uuid[]) to service_role;
 
 -- pg_cron target. Reads 'lumaline_cron_secret' from Vault and POSTs /payout/batch with the
 -- x-lumaline-cron-secret header via pg_net. Vault/secret/pg_net absent -> NOTICE + no-op.

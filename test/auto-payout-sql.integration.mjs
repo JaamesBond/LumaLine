@@ -14,9 +14,12 @@ if (SKIP) console.log(`[auto-payout-sql] ${SKIP}`);
 
 test('migration objects exist', { skip: SKIP }, () => {
   assert.equal(psql("select count(*) from information_schema.columns where table_schema='public' and table_name='publishers' and column_name='connect_nudge_at'").out, '1');
-  for (const fn of ['publisher_contact', 'payout_nudge_candidates', 'mark_connect_nudged', 'run_payout']) {
-    assert.equal(psql(`select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='app' and p.proname='${fn}'`).out, '1', `app.${fn} exists`);
+  // PostgREST only resolves the `public` schema, so these three REST-called RPCs live in `public`.
+  for (const fn of ['publisher_contact', 'payout_nudge_candidates', 'mark_connect_nudged']) {
+    assert.equal(psql(`select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='${fn}'`).out, '1', `public.${fn} exists`);
   }
+  // run_payout is a pg_cron target invoked via SQL (select app.run_payout()), not via REST — stays in app.
+  assert.equal(psql(`select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='app' and p.proname='run_payout'`).out, '1', `app.run_payout exists`);
 });
 
 test('run_payout no-ops cleanly when Vault secret absent (fresh stack)', { skip: SKIP }, () => {
@@ -25,7 +28,7 @@ test('run_payout no-ops cleanly when Vault secret absent (fresh stack)', { skip:
 });
 
 test('anon/authenticated cannot execute the new money RPCs', { skip: SKIP }, () => {
-  for (const sig of ['app.publisher_contact(uuid)', 'app.payout_nudge_candidates(bigint,interval)', 'app.mark_connect_nudged(uuid[])', 'app.run_payout()']) {
+  for (const sig of ['public.publisher_contact(uuid)', 'public.payout_nudge_candidates(bigint,interval)', 'public.mark_connect_nudged(uuid[])', 'app.run_payout()']) {
     assert.equal(psql(`select has_function_privilege('anon','${sig}','execute')`).out, 'f', `anon cannot ${sig}`);
   }
 });
