@@ -96,6 +96,35 @@ export async function serviceRpc(
 }
 
 /**
+ * Call an RPC with the SERVICE ROLE key, returning the parsed JSON result UNMODIFIED (no
+ * array-unwrap). Use this for SET-returning ("returns table(...)") RPCs — PostgREST replies
+ * with a JSON array of rows, and `serviceRpc`'s `data[0] ?? null` unwrap would silently
+ * collapse that array to (at most) its first row. Byte-identical to `serviceRpc` otherwise.
+ */
+export async function serviceRpcRows(
+  fnName: string,
+  body: Record<string, unknown>,
+): Promise<{ ok: boolean; status: number; data: unknown }> {
+  const resp = await fetch(`${RPC_BASE}/${fnName}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "accept": "application/json",
+      "apikey": SERVICE_ROLE_KEY,
+      "authorization": `Bearer ${SERVICE_ROLE_KEY}`,
+    },
+    body: JSON.stringify(body),
+  });
+  let data: unknown = null;
+  try {
+    data = await resp.json();
+  } catch {
+    data = null;
+  }
+  return { ok: resp.ok, status: resp.status, data };
+}
+
+/**
  * OPTIONAL, NOT USED BY DEFAULT — HS256 verification of a device JWT against the project
  * JWT secret, for an edge function that wants to gate before forwarding. Forwarding is
  * preferred (the DB is the authority), so this is provided only for completeness. Pass
