@@ -20,8 +20,16 @@ stamp `schema_migrations`:
 node <scratchpad>/sql.mjs @supabase/migrations/20260704150000_auto_payout.sql
 node <scratchpad>/sql.mjs "insert into supabase_migrations.schema_migrations (version,name) values ('20260704150000','auto_payout') on conflict (version) do nothing returning version;"
 ```
-Verify: `connect_nudge_at` column exists; the 4 `app.*` functions exist; `anon`/`authenticated`
-cannot execute them; `app.run_payout()` runs without error (no-ops or posts).
+Verify: `connect_nudge_at` column exists; the **three REST-called** functions
+`public.publisher_contact` / `public.payout_nudge_candidates` / `public.mark_connect_nudged` exist
+in the **`public`** schema (they MUST be in `public` — `serviceRpc` reaches them via PostgREST, which
+only resolves `public`; an `app.*` copy would 404 and silently kill the notify pass); `app.run_payout`
+exists in the **`app`** schema (pg_cron calls it via SQL, not REST); `anon`/`authenticated` cannot
+execute any of them; `app.run_payout()` runs without error (no-ops or posts). Quick check:
+```
+node <scratchpad>/sql.mjs "select p.proname||' -> '||n.nspname from pg_proc p join pg_namespace n on n.oid=p.pronamespace where p.proname in ('publisher_contact','payout_nudge_candidates','mark_connect_nudged','run_payout') order by 1;"
+# expect: mark_connect_nudged->public, payout_nudge_candidates->public, publisher_contact->public, run_payout->app
+```
 
 ## Step 2 — Set fn env on `stripe-connect` (owner GO)
 Ensure these are set for the `stripe-connect` function (via `supabase secrets set` / dashboard):
