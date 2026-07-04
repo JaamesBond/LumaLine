@@ -20,7 +20,7 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 import {
-  DEVICE_TOKEN, AUTH_BASE, TOKEN_REFRESH_SKEW_MS, FETCH_TIMEOUT_MS,
+  DEVICE_TOKEN, AUTH_BASE, STRIPE_CONNECT_BASE, TOKEN_REFRESH_SKEW_MS, FETCH_TIMEOUT_MS,
 } from '../config.mjs';
 
 // --- credential store (0600 file) -----------------------------------------------------
@@ -73,6 +73,17 @@ async function postJson(fetchImpl, url, body, { timeoutMs = FETCH_TIMEOUT_MS, be
     try { data = await res.json(); } catch { /* non-JSON */ }
     return { ok: res.ok, status: res.status, data };
   } finally { clearTimeout(timer); }
+}
+
+async function postJsonGet(fetchImpl, url, { timeoutMs = FETCH_TIMEOUT_MS, bearer } = {}) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(url, { method: 'GET', headers: bearer ? { authorization: `Bearer ${bearer}` } : {}, signal: ctrl.signal });
+    let data = null; try { data = await res.json(); } catch { /* empty */ }
+    return { ok: res.ok, status: res.status, data };
+  } catch { return { ok: false, status: 0, data: null }; }
+  finally { clearTimeout(t); }
 }
 
 // Shape a server token reply (+ optional carry-over from the prior stored token) into the
@@ -208,7 +219,7 @@ export async function login({
       const tok = shapeToken(poll.data, Date.now());
       saveToken(file, tok);
       out(`\n  ✓ Logged in as ${tok.handle ?? tok.publisher_id}. Earnings now attribute to you.`);
-      out('    (Payouts begin only at the production go-live; until then balances are informational.)');
+      out('    (Run `lumaline connect` to receive weekly automatic payouts, €1 minimum.)');
       return tok;
     }
     const err = poll.data?.error;
@@ -252,9 +263,30 @@ export async function earnings({
   const windows = Array.isArray(data?.windows) ? data.windows : [];
   out(`  windows   : ${windows.length} cleared/booked impression-window(s) on record`);
   out('');
-  out('  Note: earnings ACCRUE now but real payouts begin only at the production go-live.');
+  out('  Paid out automatically each week once you `lumaline connect` your bank (€1 minimum).');
   out('  Until then these balances are informational. Anonymous/revoked devices accrue €0.');
   return data;
+}
+
+// --- connect (self-serve bank onboarding) ----------------------------------------------
+export async function connect({
+  file = DEVICE_TOKEN, connectBase = STRIPE_CONNECT_BASE, fetchImpl = fetch,
+  now = Date.now(), timeoutMs = FETCH_TIMEOUT_MS, out = console.log,
+} = {}) {
+  const token = await getValidAccessToken({ file, authBase: AUTH_BASE, fetchImpl, now, timeoutMs });
+  if (!token) { out('Not logged in. Run `lumaline login` first.'); return; }
+
+  const st = await postJsonGet(fetchImpl, `${connectBase}/connect/status`, { bearer: token, timeoutMs });
+  if (st.ok && st.data?.onboarded) {
+    out(`✓ Bank connected — weekly payouts active (status: ${st.data.payout_status ?? 'ok'}, €1 minimum).`);
+    return;
+  }
+  const res = await postJson(fetchImpl, `${connectBase}/connect/onboard`, {}, { bearer: token, timeoutMs });
+  if (res.status === 422) { out(`Payouts aren't supported in your region yet${res.data?.error ? ': ' + res.data.error : ''}.`); return; }
+  if (!res.ok || !res.data?.onboarding_url) { out(`Could not start onboarding (HTTP ${res.status}${res.data?.error ? ': ' + res.data.error : ''}).`); return; }
+  out('Connect your bank to receive payouts — open this secure Stripe page:');
+  out(`  ${res.data.onboarding_url}`);
+  out('  (You enter your IBAN on Stripe; LumaLine never sees it. Re-run `lumaline connect` to check status.)');
 }
 
 // --- doctor helper --------------------------------------------------------------------

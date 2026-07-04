@@ -58,6 +58,10 @@ export const FEED_BASE = env.LUMALINE_FEED ||
 // the feed serves (branded default → https://feed.lumaline.dev/auth-device).
 export const AUTH_BASE = env.LUMALINE_AUTH || FEED_BASE.replace(/\/lumaline-feed\/?$/, '/auth-device');
 
+// Stripe Connect (publisher payout onboarding + status). Same branded host as AUTH_BASE — the
+// Cloudflare proxy forwards feed.lumaline.dev/<fn>/... to /functions/v1/<fn>/... for any fn.
+export const STRIPE_CONNECT_BASE = env.LUMALINE_CONNECT || FEED_BASE.replace(/\/lumaline-feed\/?$/, '/stripe-connect');
+
 // Canonical branded click host, for reference/tooling only. The CLIENT does NOT build click
 // URLs from this — it renders the `clickUrl` string carried in the *signed* feed payload verbatim
 // (statusline.mjs → safeClickUrl). The feed builds `${host}/c/${token}` server-side from its OWN
