@@ -15,6 +15,7 @@ test('payoutMinMicros: default €1 on absent/garbage/negative, honors valid', (
   assert.equal(payoutMinMicros('nope'), 1000000);
   assert.equal(payoutMinMicros('-5'), 1000000);
   assert.equal(payoutMinMicros('0'), 1000000);      // 0 would pay dust → clamp to default
+  assert.equal(payoutMinMicros('0.5'), 1000000);    // fractional-under-1 would floor to 0 → clamp to default
   assert.equal(payoutMinMicros('5000000'), 5000000);
   assert.equal(payoutMinMicros(2500000), 2500000);
 });

@@ -72,8 +72,8 @@ export function constantTimeEqual(a, b) {
   return diff === 0;
 }
 
-/** Payout minimum in micro-EUR from env; default €1 (1_000_000). Garbage/≤0 → default. */
+/** Payout minimum in micro-EUR from env; default €1 (1_000_000). Garbage/<1 → default. */
 export function payoutMinMicros(envVal) {
   const n = Number(envVal);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1000000;
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1000000;
 }
