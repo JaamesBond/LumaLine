@@ -39,6 +39,9 @@ async function main() {
     case 'earnings':
       await (await import('../src/client/auth.mjs')).earnings();
       break;
+    case 'connect':
+      await (await import('../src/client/auth.mjs')).connect({});
+      break;
     case 'doctor':
       await doctor();
       break;
@@ -111,6 +114,7 @@ Usage:
   lumaline login        Log in (device-code) so earnings attribute to your account
   lumaline logout       Log out: revoke this device, revert to the anonymous sentinel
   lumaline earnings     Show your accrued earnings (transparent ledger)
+  lumaline connect      Connect your bank (Stripe) to receive automatic weekly payouts
   lumaline doctor       Show environment + where Claude Code config lives
   lumaline version      Print version
 
@@ -118,7 +122,7 @@ Notes:
   - Uses only the official statusLine mechanism. No bundle patching.
   - Wiring happens ONLY when you run \`install\` — never automatically on npm install.
   - Login is opt-in: before it, the line runs anonymously and is never billed.
-    Earnings accrue after login but real payouts begin only at the production go-live.
+    Earnings accrue after login; run \`lumaline connect\` to receive automatic weekly payouts (€1 minimum).
   - \`login\` registers a device label (defaults to your machine hostname; \`--label <name>\` to override).
   - Disable clickable links: LUMALINE_HYPERLINKS=0`);
 }

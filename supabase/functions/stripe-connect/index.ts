@@ -30,6 +30,7 @@ import {
   bearerHeader,
   forwardRpc,
   serviceRpc,
+  serviceRpcRows,
   SUPABASE_URL,
   ANON_KEY,
   SERVICE_ROLE_KEY,
@@ -39,8 +40,11 @@ import {
   classifyTransferError,
   sumLumalineTransfersMicros,
   reversedMicrosFromTransfer,
+  constantTimeEqual,
+  payoutMinMicros,
 } from "../_shared/payout-logic.mjs";
 import { parseWebhookSecrets } from "../_shared/webhook-secrets.mjs";
+import { paidEmail, connectNudgeEmail, sendEmail } from "../_shared/email.mjs";
 
 const cors = { ...corsHeaders, "Access-Control-Allow-Methods": "GET, POST, OPTIONS" } as const;
 
@@ -98,6 +102,14 @@ async function requireAdmin(req: Request): Promise<string | null> {
   if (!auth) return null;
   const { status, text } = await forwardRpc("admin_check", {}, auth);
   return status === 200 && text.trim() === "true" ? auth : null;
+}
+
+// pg_cron auth — the weekly auto-payout job authenticates with a shared secret (Vault-stored,
+// see app.run_payout) instead of an admin JWT. Constant-time compare; empty never authorizes.
+function hasValidCronSecret(req: Request): boolean {
+  const got = req.headers.get("x-lumaline-cron-secret") ?? "";
+  const want = Deno.env.get("LUMALINE_CRON_SECRET") ?? "";
+  return constantTimeEqual(got, want);
 }
 
 // Fetch the CALLER's own publisher row via RLS (publishers_select_own). Returns null if the
@@ -290,7 +302,10 @@ Deno.serve(async (req) => {
   }
 
   // ---- Admin-only routes below --------------------------------------------------------
-  const adminAuth = await requireAdmin(req);
+  // Privileged routes: an admin JWT OR the pg_cron secret (weekly auto-payout). Both are trusted;
+  // the cron only ever calls /payout/batch, and /reconcile is read-only.
+  const cron = hasValidCronSecret(req);
+  const adminAuth = cron ? "cron" : await requireAdmin(req);
   if (!adminAuth) return jsonErr("Forbidden", 403);
 
   // ---- POST /payout/batch[?dry_run=true] (admin) --------------------------------------
@@ -298,7 +313,8 @@ Deno.serve(async (req) => {
     const dryRun = url.searchParams.get("dry_run") === "true";
 
     // Phase 1: reserve pending payouts (no ledger). Idempotent via the one-active index.
-    const reserve = await serviceRpc("payout_batch_reserve", {});
+    const minMicros = payoutMinMicros(Deno.env.get("LUMALINE_PAYOUT_MIN_MICROS"));
+    const reserve = await serviceRpc("payout_batch_reserve", { p_min_micros: minMicros });
     if (!reserve.ok) return jsonErr("reserve failed", reserve.status, reserve.data);
 
     // TRAP #2: transfer EVERY db-pending payout with no transfer id (recovers crashes),
@@ -399,10 +415,63 @@ Deno.serve(async (req) => {
       }
     }
 
+    // ---- Notifications (best-effort; a failure here never affects a payout) ------------
+    // Counters live OUTSIDE the try/catch so they always appear in the response, even if the
+    // notify pass throws before finishing (review finding 2).
+    let nudgeCandidates = 0;
+    let nudged = 0;
+    try {
+      const apiKey = Deno.env.get("RESEND_API_KEY") ?? "";
+      const from = Deno.env.get("LUMALINE_EMAIL_FROM") ?? "LumaLine <payouts@send.lumaline.dev>";
+      const eur = (c: number) => (c / 100).toFixed(2);
+
+      // Paid confirmations
+      for (const r of results.filter((x) => x.status === "paid")) {
+        const po = pending.find((p) => p.id === r.payout_id);
+        if (!po) continue;
+        const c = await serviceRpc("publisher_contact", { p_publisher_id: po.publisher_id });
+        const contact = (c.ok ? c.data : null) as { email?: string; handle?: string } | null;
+        if (!contact?.email) continue;
+        const { subject, html, text } = paidEmail({ handle: contact.handle ?? "there", amountEur: eur(microsToCents(po.amount_micros)) });
+        await sendEmail({ to: contact.email, subject, html, text, apiKey, from });
+      }
+
+      // Connect-nudges (over-min, not onboarded, not nudged in ~a week).
+      // review finding 1: payout_nudge_candidates is SET-returning (a JSON array), so it MUST
+      // go through serviceRpcRows — serviceRpc unwraps arrays to a single row and would
+      // silently turn every candidate list into [] (or a lone object), so no nudge would ever
+      // send and mark_connect_nudged would never be called.
+      const nudge = await serviceRpcRows("payout_nudge_candidates", { p_min_micros: minMicros });
+      const cands = (nudge.ok && Array.isArray(nudge.data) ? nudge.data : []) as Array<{ publisher_id: string; email: string; handle: string; payable_micros: number }>;
+      nudgeCandidates = cands.length;
+      const nudgedIds: string[] = [];
+      for (const cnd of cands) {
+        if (!cnd.email) continue;
+        const { subject, html, text } = connectNudgeEmail({ handle: cnd.handle ?? "there", amountEur: eur(microsToCents(cnd.payable_micros)) });
+        const res = await sendEmail({ to: cnd.email, subject, html, text, apiKey, from });
+        if (res === "sent") nudgedIds.push(cnd.publisher_id);
+      }
+      nudged = nudgedIds.length;
+      if (nudgedIds.length > 0) await serviceRpc("mark_connect_nudged", { p_ids: nudgedIds });
+    } catch (err) {
+      console.error(`payout: notify pass failed (non-fatal): ${(err as { message?: string }).message ?? "unknown"}`);
+    }
+
     const paid = results.filter((r) => r.status === "paid").length;
     const deferred = results.filter((r) => r.status === "deferred").length;
     const failed = results.filter((r) => r.status === "failed").length;
-    return jsonOk({ ok: true, dry_run: false, reserved: reserve.data, paid, deferred, failed, processed: results.length, results });
+    return jsonOk({
+      ok: true,
+      dry_run: false,
+      reserved: reserve.data,
+      paid,
+      deferred,
+      failed,
+      processed: results.length,
+      nudge_candidates: nudgeCandidates,
+      nudged,
+      results,
+    });
   }
 
   // ---- GET /reconcile?from&to (admin) -------------------------------------------------

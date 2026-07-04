@@ -62,3 +62,18 @@ export function reversedMicrosFromTransfer(transfer) {
   const cents = (transfer && (transfer.amount_reversed ?? transfer.amount)) ?? 0;
   return (Number(cents) || 0) * 10000;
 }
+
+/** Constant-time string compare (no early-exit on mismatch). Empty strings never authorize. */
+export function constantTimeEqual(a, b) {
+  const sa = String(a ?? ""), sb = String(b ?? "");
+  if (sa.length === 0 || sb.length === 0 || sa.length !== sb.length) return false;
+  let diff = 0;
+  for (let i = 0; i < sa.length; i++) diff |= sa.charCodeAt(i) ^ sb.charCodeAt(i);
+  return diff === 0;
+}
+
+/** Payout minimum in micro-EUR from env; default €1 (1_000_000). Garbage/<1 → default. */
+export function payoutMinMicros(envVal) {
+  const n = Number(envVal);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1000000;
+}

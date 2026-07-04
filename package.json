@@ -1,6 +1,6 @@
 {
   "name": "lumaline",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Trust-first sponsored status line for Claude Code. Official statusLine only — signed feed, no bundle patching, no CSP changes.",
   "type": "module",
   "bin": {
