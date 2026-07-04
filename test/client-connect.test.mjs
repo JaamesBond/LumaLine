@@ -37,3 +37,24 @@ test('connect: not onboarded → posts onboard, prints the onboarding_url', asyn
   await connect({ file: tokenFile(), connectBase: 'https://x/stripe-connect', fetchImpl, out: (s) => lines.push(s) });
   assert.match(lines.join('\n'), /connect\.stripe\.com\/setup\/abc/);
 });
+
+test('connect: onboard fetch throws (network error) → prints graceful message, does not throw', async () => {
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/connect/status')) return { ok: true, status: 200, json: async () => ({ ok: true, onboarded: false, payout_status: 'pending' }) };
+    throw new Error('fetch failed: ECONNRESET');
+  };
+  const lines = [];
+  await assert.doesNotReject(connect({ file: tokenFile(), connectBase: 'https://x/stripe-connect', fetchImpl, out: (s) => lines.push(s) }));
+  assert.match(lines.join('\n'), /network error/i);
+});
+
+test('connect: not logged in (no/expired token) → prints "Not logged in", never calls fetch', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'lumaline-connect-'));
+  const file = join(d, 'device-token.json'); // never written — loadToken() sees no file
+  let called = false;
+  const fetchImpl = async () => { called = true; return { ok: true, status: 200, json: async () => ({}) }; };
+  const lines = [];
+  await connect({ file, connectBase: 'https://x/stripe-connect', fetchImpl, out: (s) => lines.push(s) });
+  assert.match(lines.join('\n'), /Not logged in/);
+  assert.equal(called, false, 'must not call fetch when not logged in');
+});
