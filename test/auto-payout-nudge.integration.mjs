@@ -1,6 +1,6 @@
 // test/auto-payout-nudge.integration.mjs — M5-T4 auto-payout nudge candidates + dedup (Stripe-free).
 //
-// Exercises app.payout_nudge_candidates + app.mark_connect_nudged (20260704150000_auto_payout.sql)
+// Exercises public.payout_nudge_candidates + public.mark_connect_nudged (20260704150000_auto_payout.sql)
 // directly against the local Supabase DB via psql — the connecting role (postgres) is a superuser
 // and bypasses the service_role-only grants, same trick test/auto-payout-sql.integration.mjs relies
 // on for `select app.run_payout()`. Setup mirrors test/payout-rails.integration.mjs's
@@ -79,7 +79,7 @@ if (!SKIP) process.on('exit', teardown);
 /** Row (as `id|email|handle|payable`) for `pubId` in the current nudge-candidates result, or '' if absent. */
 function candidateRow(pubId) {
   return psql(`select coalesce(t.publisher_id::text,'') ||'|'|| coalesce(t.email,'') ||'|'|| coalesce(t.handle,'') ||'|'|| coalesce(t.payable_micros::text,'')
-    from app.payout_nudge_candidates(${MIN}, ${HOLD_SQL}) t where t.publisher_id = '${pubId}'::uuid;`);
+    from public.payout_nudge_candidates(${MIN}, ${HOLD_SQL}) t where t.publisher_id = '${pubId}'::uuid;`);
 }
 
 test('N1/N2/N3: un-onboarded over-min publisher is a nudge candidate; mark_connect_nudged dedupes it', { skip: SKIP }, () => {
@@ -98,7 +98,7 @@ test('N1/N2/N3: un-onboarded over-min publisher is a nudge candidate; mark_conne
   // N2: mark_connect_nudged sets connect_nudge_at.
   const before = psql(`select coalesce(connect_nudge_at::text,'') from public.publishers where id='${pub.pubId}';`);
   assert.equal(before, '', 'connect_nudge_at must start unset');
-  psql(`select app.mark_connect_nudged(array['${pub.pubId}']::uuid[]);`);
+  psql(`select public.mark_connect_nudged(array['${pub.pubId}']::uuid[]);`);
   const after = psql(`select coalesce(connect_nudge_at::text,'') from public.publishers where id='${pub.pubId}';`);
   assert.notEqual(after, '', 'connect_nudge_at must be set after mark_connect_nudged');
 
