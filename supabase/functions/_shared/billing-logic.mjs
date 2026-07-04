@@ -15,6 +15,105 @@
 export const TEST_FALLBACK_PM = "pm_card_visa";
 
 /**
+ * Convert micro-EUR to Stripe cents. 1 EUR = 1,000,000 micro-EUR = 100 cents.
+ * Rounded (banker-agnostic Math.round) — the same conversion the charge + reconcile use.
+ * @param {number} micros
+ * @returns {number} cents
+ */
+export function microsToCents(micros) {
+  return Math.round(Number(micros) / 10000);
+}
+
+/**
+ * Stripe idempotency key for an AGGREGATE advertiser charge, derived from the IMMUTABLE
+ * charge_batch_id stamped on the reserved rows — NOT from the (mutable) set of uncharged groups.
+ *
+ * This is the crux of the crash-safety fix (adversarial review F1): a batch's membership is frozen
+ * at reserve time, so a crash/ambiguous-error retry — or a recovery run — reselects the SAME batch
+ * and recomputes the SAME key, and Stripe returns the SAME PaymentIntent. Impressions that accrue
+ * afterwards form a NEW batch with a NEW key; they can never merge into an already-attempted charge
+ * and trigger a re-charge of the impressions it already billed.
+ * @param {string} batchId  a uuid
+ * @returns {string}
+ */
+export function batchIdempotencyKey(batchId) {
+  return `lumaline_agg_${String(batchId)}`;
+}
+
+/**
+ * Partition reserved-but-unsettled (pending) advertiser_charges rows by their charge_batch_id.
+ * Recovery re-issues each batch under its own stable key — never across batches. Rows without a
+ * batch id (legacy/malformed) are grouped under the sentinel key "" so they can be released, not
+ * silently charged.
+ * @param {Array<{charge_batch_id?:string|null, advertiser_id:string}>} rows
+ * @returns {Map<string, {advertiser_id:string, rows:any[]}>}
+ */
+export function partitionPendingByBatch(rows) {
+  const byBatch = new Map();
+  for (const r of rows ?? []) {
+    const key = r.charge_batch_id ?? "";
+    let b = byBatch.get(key);
+    if (!b) { b = { advertiser_id: r.advertiser_id, rows: [] }; byBatch.set(key, b); }
+    b.rows.push(r);
+  }
+  return byBatch;
+}
+
+/**
+ * Group uncharged ledger view rows by advertiser and decide the per-advertiser action.
+ *
+ * WHY AGGREGATE: CPVA bills per attention-second (~€0.05 / 5s view), so a single impression is
+ * ~5 cents — permanently below Stripe's 50-cent minimum. Charging per impression can therefore
+ * NEVER collect from such an advertiser. Charges must be summed per advertiser into one
+ * PaymentIntent. A below-minimum AGGREGATE is a NON-terminal skip: it writes no charge row, so
+ * the groups stay in the uncharged view and keep accumulating until the total clears the minimum.
+ *
+ * @param {Array<{advertiser_id:string, advertiser_name?:string, is_house?:boolean,
+ *   stripe_customer_id?:string|null, entry_group_id:string, amount_micros:number,
+ *   impression_id?:string|null, publisher_id?:string|null}>} rows
+ * @param {{minCents?:number}} [opts]
+ * @returns {Array<{advertiser_id:string, advertiser_name:string|null, is_house:boolean,
+ *   stripe_customer_id:string|null, groups:Array<{entry_group_id:string, amount_micros:number,
+ *   impression_id:string|null, publisher_id:string|null}>, entryGroupIds:string[],
+ *   sumMicros:number, sumCents:number, action:'skip_house'|'skip_below_min'|'charge'}>}
+ */
+export function planAdvertiserCharges(rows, { minCents = 50 } = {}) {
+  const byAdv = new Map();
+  for (const r of rows ?? []) {
+    const id = r.advertiser_id;
+    let p = byAdv.get(id);
+    if (!p) {
+      p = {
+        advertiser_id: id,
+        advertiser_name: r.advertiser_name ?? null,
+        is_house: r.is_house === true,
+        stripe_customer_id: r.stripe_customer_id ?? null,
+        groups: [],
+        sumMicros: 0,
+      };
+      byAdv.set(id, p);
+    }
+    const micros = Number(r.amount_micros) || 0;
+    p.groups.push({
+      entry_group_id: r.entry_group_id,
+      amount_micros: micros,
+      impression_id: r.impression_id ?? null,
+      publisher_id: r.publisher_id ?? null,
+    });
+    p.sumMicros += micros;
+  }
+  return [...byAdv.values()].map((p) => {
+    const sumCents = microsToCents(p.sumMicros);
+    const action = p.is_house
+      ? "skip_house"
+      : sumCents < minCents
+        ? "skip_below_min"
+        : "charge";
+    return { ...p, entryGroupIds: p.groups.map((g) => g.entry_group_id), sumCents, action };
+  });
+}
+
+/**
  * True when a Stripe secret key is a LIVE key (sk_live_* or rk_live_* restricted key).
  * Anything else (sk_test_*, rk_test_*, empty, garbage) is treated as NOT live, which is
  * the safe direction: test-mode fallbacks only ever engage for non-live keys, and a

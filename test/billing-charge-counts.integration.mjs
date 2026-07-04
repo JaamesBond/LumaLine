@@ -117,17 +117,35 @@ test('T45: charged equals counts.succeeded (no longer conflates skipped/failed)'
   assert.equal(b.counts.failed, 0, 'dry-run must report 0 failed');
 });
 
-test('T46: below-minimum is bucketed skipped; billable is bucketed would_charge', { skip: SKIP }, async () => {
-  const belowMin = await insertClearedBillingEntry(100_000);   // 10 cents < 50 → skipped
-  const billable = await insertClearedBillingEntry(1_000_000); // $1.00 → would_charge
+// Since per-advertiser aggregation: multiple cleared entries under ONE advertiser collapse into a
+// SINGLE would_charge plan whose group_count = the number of aggregated impressions (the only way a
+// €0.05/view advertiser ever clears Stripe's 50-cent minimum). Below-minimum non-terminal skip is
+// covered by billing.integration T23 + the exhaustive unit tests in billing-aggregation.test.mjs.
+test('T46: entries under one advertiser AGGREGATE into a single would_charge (group_count = N)', { skip: SKIP }, async () => {
+  const e1 = await insertClearedBillingEntry(200_000); // 20c
+  const e2 = await insertClearedBillingEntry(200_000); // 20c
+  const e3 = await insertClearedBillingEntry(200_000); // 20c  → 60c aggregate ≥ 50 → charge
   try {
+    // Resolve DEV_LINE_ITEM_ID's advertiser so we can find its single aggregated plan.
+    const li = await svcReq('GET', 'line_items', { query: `id=eq.${DEV_LINE_ITEM_ID}&select=campaign_id` });
+    const campaignId = li.data?.[0]?.campaign_id;
+    const cm = await svcReq('GET', 'campaigns', { query: `id=eq.${campaignId}&select=advertiser_id` });
+    const advertiserId = cm.data?.[0]?.advertiser_id;
+    assert.ok(advertiserId, 'resolved DEV advertiser_id');
+
     const res = await chargeDryRun();
     assert.ok(res.ok, `dry-run failed: ${JSON.stringify(res.data)}`);
     const b = res.data;
-    assert.ok(b.counts.skipped >= 1, `expected >=1 skipped, got ${b.counts.skipped}`);
-    assert.ok(b.counts.would_charge >= 1, `expected >=1 would_charge, got ${b.counts.would_charge}`);
+
+    const advResults = b.results.filter((r) => r.advertiser_id === advertiserId);
+    assert.equal(advResults.length, 1, `advertiser must appear as ONE aggregated plan, got ${advResults.length}`);
+    const plan = advResults[0];
+    assert.equal(plan.would_charge, true, 'aggregate ≥ 50c → would_charge');
+    assert.ok(plan.group_count >= 3, `aggregated plan must cover >=3 impressions, got ${plan.group_count}`);
+    assert.ok(plan.amount_cents >= 60, `aggregate amount must be >= 60c, got ${plan.amount_cents}`);
   } finally {
-    await cleanup(belowMin);
-    await cleanup(billable);
+    await cleanup(e1);
+    await cleanup(e2);
+    await cleanup(e3);
   }
 });

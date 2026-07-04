@@ -158,6 +158,44 @@ test('getValidAccessToken: a stale lock (crashed holder) is reclaimed so refresh
   assert.equal(loadToken(f).refresh_token, 'refresh-NEW');
 });
 
+test('getValidAccessToken: an aborted refresh leaves the OLD token on disk, and the next tick RE-PRESENTS it (server-grace self-heal)', async () => {
+  // Client half of migration 20260704120000 (refresh-token grace window). The SQL grace only recovers
+  // a crash-mid-rotation if the client — having failed to persist the successor — re-presents the SAME
+  // (old) refresh token on its next tick. Pin that contract: the integration tests drive SQL directly
+  // and can NOT catch a client refactor (persist-before-call, clear-on-fail) that would break self-heal.
+  const f = tmp();
+  const nowS = 1_700_000_000;
+  saveToken(f, tokenObj(nowS + 60));            // 60s left → inside the 300s skew → attempts refresh
+  const base = 'https://x/auth-device';
+
+  // Tick 1 — the server rotates, but the client ABORTS before persisting (killed at FETCH_TIMEOUT).
+  const calls1 = [];
+  const tok1 = await getValidAccessToken({
+    file: f, now: nowS * 1000, skewMs: 300_000, authBase: base,
+    fetchImpl: async (url, opts) => {
+      calls1.push({ url, body: JSON.parse(opts.body) });
+      throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+    },
+  });
+  assert.equal(calls1[0].body.refresh_token, 'refresh-abc', 'tick 1 presented the original token');
+  assert.equal(tok1, tokenObj(nowS + 60).access_token, 'tick 1 falls back to the still-valid access token (never throws)');
+  assert.equal(loadToken(f).refresh_token, 'refresh-abc', 'the OLD refresh token is STILL on disk — successor was never persisted');
+
+  // Tick 2 — the server GRACE arm accepts the re-presented original and rotates. Client MUST re-present the original.
+  const calls2 = [];
+  const newAccess = fakeJwt(nowS + 3600, { publisher_id: 'p1' });
+  const tok2 = await getValidAccessToken({
+    file: f, now: nowS * 1000, skewMs: 300_000, authBase: base,
+    fetchImpl: async (url, opts) => {
+      calls2.push({ url, body: JSON.parse(opts.body) });
+      return { ok: true, status: 200, json: async () => ({ access_token: newAccess, refresh_token: 'refresh-RECOVERED', expires_in: 3600 }) };
+    },
+  });
+  assert.equal(calls2[0].body.refresh_token, 'refresh-abc', 'tick 2 RE-PRESENTS the original (grace-recoverable) token');
+  assert.equal(tok2, newAccess, 'tick 2 recovers a fresh access token via the grace arm');
+  assert.equal(loadToken(f).refresh_token, 'refresh-RECOVERED', 'the recovery successor is now persisted');
+});
+
 test('login: device-code flow polls until approved, then persists the token', async () => {
   const f = tmp();
   const printed = [];
