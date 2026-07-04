@@ -1,0 +1,43 @@
+{
+  "report": "lumaline-transparency",
+  "version": 1,
+  "generated_at": "2026-07-03T17:21:19.005Z",
+  "currency": "EUR",
+  "cleared": {
+    "gross_micros": 0,
+    "publisher_micros": 0,
+    "platform_micros": 0,
+    "publisher_share_bps": null,
+    "view_count": 0,
+    "attention_seconds": 0,
+    "avg_gross_per_view_micros": null,
+    "avg_gross_per_attention_second_micros": null
+  },
+  "provisional": {
+    "gross_micros": 50000,
+    "view_count": 1
+  },
+  "clawback": {
+    "reversed_gross_micros": 0,
+    "reversed_group_count": 0,
+    "clawback_rate_bps": null
+  },
+  "delivery": {
+    "windows_open": 78,
+    "windows_credited": 1409,
+    "windows_abandoned": 26035,
+    "windows_void": 0,
+    "windows_terminal": 27444,
+    "fill_rate_bps": 513,
+    "credited_views": 1409,
+    "clicks_credited": 0
+  },
+  "reconciliation": {
+    "ledger_global_sum_micros": 0,
+    "unbalanced_group_count": 0,
+    "zero_sum_ok": true,
+    "accrual_identity_ok": true,
+    "publisher_split_ok": true,
+    "all_ok": true
+  }
+}
