@@ -20,3 +20,23 @@ docs/BLOCKED.md
 docs/REVIEW_TODO.md
 docs/superpowers/
 docs/gtm/
+
+# --- Repo-hygiene hardening (2026-07-04 public-scrutiny audit) ---
+# Third-party prospect PII (200+ named leads/emails), outreach drafts, TOS-sensitive GTM
+# automation. Never publish.
+business/
+# Operational runbooks: Ed25519 key custody + on-disk private-key paths, incident-response,
+# deploy commands, project ref, IVT/monitoring cadence, known-weakness inventory, live Stripe
+# customer/card fragments. No raw secrets, but high reconnaissance value → internal-only.
+docs/ops/
+# Marketing automation prompts + CRM Google Sheet URL + owner PII.
+docs/marketing/
+# Local Claude Code state — settings.local.json carries a live API key. Repo-level ignore so
+# it never depends on the machine's global excludesfile.
+.claude/settings.local.json
+# Dev browser-automation snapshots (device codes, DOM dumps) + a stray activate-page screenshot.
+.playwright-mcp/
+activate-fixed.png
+# Vendored third-party agent skills + lockfile (clutter, not product).
+.agents/
+skills-lock.json
