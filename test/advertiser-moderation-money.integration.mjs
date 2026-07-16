@@ -370,6 +370,64 @@ test('M5b: BALANCE clawback of a CREDITED-but-UNDRAWN impression RELEASES the st
   assert.equal(getBalance(advId).balance, 100000000, 'balance unchanged (undrawn — no re-credit)');
 });
 
+test('M5c: DIRECT admin_open_clawback of a prepay credited-undrawn impression RELEASES the reserve', { skip: SKIP }, async () => {
+  // The same stranded-reserve seam as M5b, but through the GENERIC admin_open_clawback (M8) instead
+  // of admin_prepay_clawback. admin_open_clawback is directly callable by money-admins AND is the
+  // delegate admin_prepay_clawback routes the Stripe/postpay path to, so it must release the prepay
+  // reserve on its own (migration 20260716220000). public.clawback() predates prepay and never
+  // touches the reserve, so without the fix a direct call here would strand reserved_micros forever.
+  const { advId, liId } = seedAdvertiser();
+  const { pubId } = seedPublisher(`mm-p5c-${randomUUID()}@example.com`);
+  const deviceId = randomUUID();
+  psql(`insert into public.devices (id, publisher_id) values ('${deviceId}','${pubId}');`);
+
+  // Deposit €100 (never drawn), then hold €8 of reserve for a credited-undrawn window (no charge row).
+  const sess = `s5c_${advId.slice(0, 8)}`, pi = `pi5c_${advId.slice(0, 8)}`;
+  psql(`insert into public.advertiser_topup_intents (checkout_session_id, advertiser_id, amount_micros) values ('${sess}','${advId}',100000000);`);
+  psqlJson(`select app.advertiser_credit_deposit('${advId}','${sess}','${pi}','e5c',100000000);`);
+
+  const gross = 8000000, winId = randomUUID();
+  psql(`update public.advertiser_balances set reserved_micros=${gross} where advertiser_id='${advId}';`);
+  const { impId } = seedImpressionAccrual({ pubId, liId, gross, winId, state: 'cleared' });
+  psql(`insert into public.ad_windows (window_id, publisher_id, device_id, line_item_id, challenge, nonce, reserve_micros, state)
+        values ('${winId}','${pubId}','${deviceId}','${liId}','ch','no',${gross},'credited');`);
+  assert.equal(getBalance(advId).reserved, gross, 'reserved holds the credited-undrawn window');
+
+  const res = await rpc('admin_open_clawback', { p_impression_id: impId, p_reason: 'verified fraud' }, MADMIN_JWT);
+  assert.ok(res.ok, `clawback failed: ${res.status} ${JSON.stringify(res.data)}`);
+  assert.equal(res.data.ok, true);
+  assert.equal(res.data.reserve_released_micros, gross, 'the released reserve is reported in the result');
+  assert.equal(res.data.refund_required, false, 'no charge row → nothing to refund');
+
+  assert.equal(psql(`select state from public.impressions where id='${impId}';`), 'clawed_back', 'impression clawed_back');
+  assert.equal(psql(`select reserve_micros from public.ad_windows where window_id='${winId}';`), '0', 'the window reserve is zeroed');
+  assert.equal(getBalance(advId).reserved, 0, 'the STRANDED reserve is released back (8M -> 0)');
+  assert.equal(getBalance(advId).balance, 100000000, 'balance unchanged (admin_open_clawback releases the reserve, never re-credits)');
+
+  // Idempotent: a repeat is refused as already_clawed_back and moves nothing.
+  const again = await rpc('admin_open_clawback', { p_impression_id: impId, p_reason: 'x' }, MADMIN_JWT);
+  assert.equal(again.data.ok, false, 'repeat refused');
+  assert.equal(again.data.reason, 'already_clawed_back');
+  assert.equal(getBalance(advId).reserved, 0, 'reserve stays 0 on the idempotent repeat');
+});
+
+// A postpay window carries reserve_micros=0, so the release is a safe no-op: admin_open_clawback of a
+// postpay impression must reverse normally without touching any advertiser balance.
+test('M5d: admin_open_clawback of a POSTPAY impression is a reserve-release no-op', { skip: SKIP }, async () => {
+  const { advId, liId } = seedAdvertiser({ billingMode: 'postpay', campStatus: 'active', liStatus: 'active' });
+  const { pubId } = seedPublisher(`mm-p5d-${randomUUID()}@example.com`);
+  const { impId, grp } = seedImpressionAccrual({ pubId, liId, gross: 1000000 });
+  seedCharge({ grp, advId, impId, amount: 1000000, settledVia: 'stripe', stripeChargeId: `pi_${grp.slice(0, 8)}` });
+
+  const res = await rpc('admin_open_clawback', { p_impression_id: impId, p_reason: 'postpay dispute' }, MADMIN_JWT);
+  assert.ok(res.ok, `clawback failed: ${res.status} ${JSON.stringify(res.data)}`);
+  assert.equal(res.data.ok, true);
+  assert.equal(res.data.reserve_released_micros, 0, 'no reserve to release for a postpay window');
+  assert.equal(res.data.refund_required, true, 'a succeeded CPVA charge → refund_required');
+  assert.equal(psql(`select state from public.impressions where id='${impId}';`), 'clawed_back', 'impression clawed_back');
+  assert.equal(getBalance(advId).reserved, 0, 'postpay reserved stays 0');
+});
+
 test('M6: admin_prepay_clawback (STRIPE) delegates to the card path (settled_via=stripe, refund_required)', { skip: SKIP }, async () => {
   const { advId, liId } = seedAdvertiser({ billingMode: 'postpay', campStatus: 'active', liStatus: 'active' });
   const { pubId } = seedPublisher(`mm-p6-${randomUUID()}@example.com`);
