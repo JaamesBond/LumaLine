@@ -37,7 +37,12 @@ function mintJwt(sub, extra = {}) {
   const sig     = createHmac('sha256', JWT_SECRET).update(`${head}.${payload}`).digest('base64url');
   return `${head}.${payload}.${sig}`;
 }
-const ADMIN_JWT     = mintJwt(ADMIN_USER_ID);
+// M8 re-gate: public.gdpr_delete_publisher now reduces to app.is_money_admin()
+// (20260716120000_harden_money_rpc_gates.sql) = member(app.money_admins) AND the session's jwt
+// aal='aal2'. The dev admin is seeded into BOTH app.admins and app.money_admins (seed.sql), so the
+// only extra the admin path needs is an aal2 session claim — a plain aal1 admin JWT now 28000s.
+// (Mirrors test/admin-gate-hardening.integration.mjs's MADMIN persona.)
+const ADMIN_JWT     = mintJwt(ADMIN_USER_ID, { aal: 'aal2' });
 const NON_ADMIN_JWT = mintJwt(NON_ADMIN_USER_ID);
 
 function psql(sql) {

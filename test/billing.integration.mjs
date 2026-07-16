@@ -56,15 +56,19 @@ const HAS_STRIPE = STRIPE_KEY.startsWith('sk_test_');
 // ---------------------------------------------------------------------------
 
 /** Mint a Supabase Auth–style HS256 JWT (same secret PostgREST trusts locally). */
-function mintJwt(sub) {
+function mintJwt(sub, extra = {}) {
   const enc = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
   const head    = enc({ alg: 'HS256', typ: 'JWT' });
-  const payload = enc({ role: 'authenticated', aud: 'authenticated', sub, iat: 1700000000, exp: 2000000000 });
+  const payload = enc({ role: 'authenticated', aud: 'authenticated', sub, iat: 1700000000, exp: 2000000000, ...extra });
   const sig = createHmac('sha256', JWT_SECRET).update(`${head}.${payload}`).digest('base64url');
   return `${head}.${payload}.${sig}`;
 }
 
-const ADMIN_JWT     = mintJwt(ADMIN_USER_ID);
+// M8: POST /billing/charge is re-gated to the aal2 money tier (requireMoneyAdmin → money_admin_check
+// → app.is_money_admin()). seed.sql seeds ADMIN_USER_ID into app.money_admins, so this bearer must
+// carry aal='aal2' to pass /charge. GET /reconcile stays on requireAdmin, which an aal2 admin also
+// satisfies, so one bearer covers every admin call here; NON_ADMIN_JWT still 403s on both.
+const ADMIN_JWT     = mintJwt(ADMIN_USER_ID, { aal: 'aal2' });
 const NON_ADMIN_JWT = mintJwt(NON_ADMIN_USER_ID);
 
 /** Service-role REST request. Returns { ok, status, data }. */

@@ -32,7 +32,9 @@ function mintJwt(sub, extra = {}) {
   const sig     = createHmac('sha256', JWT_SECRET).update(`${head}.${payload}`).digest('base64url');
   return `${head}.${payload}.${sig}`;
 }
-const ADMIN_JWT = mintJwt(ADMIN_USER_ID);
+// /charge is re-gated to app.is_money_admin() (aal2 + app.money_admins) since M8, so the admin
+// session must carry aal2 (ADMIN_USER_ID is seeded into app.money_admins in seed.sql).
+const ADMIN_JWT = mintJwt(ADMIN_USER_ID, { aal: 'aal2' });
 
 async function svcReq(method, resource, { body, query, prefer } = {}) {
   const resp = await fetch(`${REST_BASE}/${resource}${query ? `?${query}` : ''}`, {

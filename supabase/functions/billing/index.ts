@@ -122,6 +122,17 @@ async function requireAdmin(req: Request): Promise<string | null> {
   return status === 200 && text.trim() === "true" ? auth : null;
 }
 
+// Money-admin guard — the aal2 + app.money_admins tier (money_admin_check() wraps
+// app.is_money_admin()). Re-gates the ONLY money-mutating billing route (POST /refund) so a
+// stolen aal1 magic-link session, which still passes requireAdmin, cannot issue a Stripe refund.
+// Read-only routes (GET /reconcile) stay on requireAdmin — membership is sufficient there.
+async function requireMoneyAdmin(req: Request): Promise<string | null> {
+  const auth = bearerHeader(req);
+  if (!auth) return null;
+  const { status, text } = await forwardRpc("money_admin_check", {}, auth);
+  return status === 200 && text.trim() === "true" ? auth : null;
+}
+
 // Lazy Stripe client — only initialised when a real charge is about to be attempted.
 // This allows the fn to boot and handle dry_run / house-skip / below-min-skip paths
 // without STRIPE_SECRET_KEY, keeping no-Stripe integration tests green.
@@ -526,6 +537,13 @@ Deno.serve(async (req) => {
 
   // ---- POST /charge (or /charge?dry_run=true) --------------------------------
   if (req.method === "POST" && path.endsWith("/charge")) {
+    // Re-gate this money-mutating route to the aal2 money-admin tier: /charge creates real
+    // advertiser Stripe charges, so a stolen aal1 magic-link session (which still passes the
+    // top-level requireAdmin) must not reach it. There is no cron/automation caller for /charge
+    // (only the auto-payout cron hits stripe-connect/payout/batch), so this does not break any
+    // automation path. Read-only /reconcile stays on requireAdmin (membership is sufficient there).
+    if (!(await requireMoneyAdmin(req))) return jsonErr("Forbidden", 403);
+
     const dryRun = url.searchParams.get("dry_run") === "true";
 
     // Fetch uncharged cleared entries (up to 500). Charges MUST aggregate per advertiser — a
@@ -761,6 +779,10 @@ Deno.serve(async (req) => {
   // Amount comes from advertiser_charges.amount_cents (what was actually charged),
   // not recomputed from impression gross, to avoid rounding drift.
   if (req.method === "POST" && path.endsWith("/refund")) {
+    // Re-gate this money-mutating route to the aal2 money-admin tier (the top-level
+    // requireAdmin only proves app.admins membership; a refund moves real cash).
+    if (!(await requireMoneyAdmin(req))) return jsonErr("Forbidden", 403);
+
     let refundBody: Record<string, unknown> = {};
     try { refundBody = await req.json(); } catch { /* empty body ok */ }
 

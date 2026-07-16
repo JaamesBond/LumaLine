@@ -29,6 +29,7 @@ import {
   NON_TERMINAL_PAYOUT_STATUSES,
   PAYOUT_STUCK_MAX_AGE_MS,
   RECON_WINDOW_DAYS,
+  REVERSED_CHARGE_UNREFUNDED_GRACE_MS,
   buildAlertEmail,
   errorCheck,
   evalBillingStalled,
@@ -37,6 +38,7 @@ import {
   evalPayoutFailed,
   evalPayoutStuck,
   evalReconDrift,
+  evalReversedChargeUnrefunded,
   resolvableCheckNames,
   shouldSendEmail,
   sumLumalinePaymentIntents,
@@ -341,10 +343,11 @@ test('ML32: resolvableCheckNames includes pass+fail, excludes error (an unobserv
   assert.deepEqual(names, ['ledger_zero_sum', 'payout_stuck']);
 });
 
-test('ML33: CHECK_NAMES covers all seven T6 checks', () => {
+test('ML33: CHECK_NAMES covers all T6 checks + the Phase-2 reversed_charge_unrefunded backstop', () => {
   assert.deepEqual(CHECK_NAMES, [
     'ledger_zero_sum', 'payout_stuck', 'payout_failed',
     'charge_failed', 'billing_stalled', 'billing_recon_drift', 'payout_recon_drift',
+    'reversed_charge_unrefunded',
   ]);
 });
 
@@ -484,4 +487,141 @@ test('ML47: independent advertisers alert independently; unreadable micros still
 
 test('ML48: billing_stalled is in CHECK_NAMES (deployable check set)', () => {
   assert.ok(CHECK_NAMES.includes('billing_stalled'));
+});
+
+// ---------------------------------------------------------------------------
+// reversed_charge_unrefunded (Phase-2 backstop: approved clawback whose advertiser
+// refund was never queued while a succeeded charge still exists, past the grace)
+// ---------------------------------------------------------------------------
+
+const IMP1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const IMP2 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const GRACE = REVERSED_CHARGE_UNREFUNDED_GRACE_MS;
+
+test('ML49: approved review + succeeded charge past grace fires HIGH, dedup review:<id>, with the charge details', () => {
+  const r = evalReversedChargeUnrefunded({
+    reviews: [{ id: 'rv1', impression_id: IMP1, reviewed_at: iso(GRACE + 1), refund_queued: false, status: 'approved' }],
+    charges: [{ id: 'ch1', impression_id: IMP1, amount_cents: 110, status: 'succeeded' }],
+    now: NOW,
+  });
+  assert.equal(r.status, 'fail');
+  assert.equal(r.alerts.length, 1);
+  const a = r.alerts[0];
+  assert.equal(a.check_name, 'reversed_charge_unrefunded');
+  assert.equal(a.severity, 'high');
+  assert.equal(a.dedup_key, 'review:rv1');
+  assert.equal(a.payload.review_id, 'rv1');
+  assert.equal(a.payload.impression_id, IMP1);
+  assert.equal(a.payload.charge_id, 'ch1');
+  assert.equal(a.payload.amount_cents, 110);
+  assert.equal(a.payload.age_ms, GRACE + 1);
+});
+
+test('ML50: a refunded review (refund_queued=true) NEVER fires (no false positive once cash is returned)', () => {
+  const r = evalReversedChargeUnrefunded({
+    reviews: [{ id: 'rv1', impression_id: IMP1, reviewed_at: iso(GRACE + 10_000), refund_queued: true, status: 'approved' }],
+    charges: [{ id: 'ch1', impression_id: IMP1, amount_cents: 110, status: 'succeeded' }],
+    now: NOW,
+  });
+  assert.equal(r.status, 'pass');
+});
+
+test('ML51: non-approved reviews (pending / rejected) never fire — only approved reversals are refund-eligible', () => {
+  const r = evalReversedChargeUnrefunded({
+    reviews: [
+      { id: 'rv1', impression_id: IMP1, reviewed_at: iso(GRACE + 10_000), refund_queued: false, status: 'pending' },
+      { id: 'rv2', impression_id: IMP2, reviewed_at: iso(GRACE + 10_000), refund_queued: false, status: 'rejected' },
+    ],
+    charges: [
+      { id: 'ch1', impression_id: IMP1, amount_cents: 110, status: 'succeeded' },
+      { id: 'ch2', impression_id: IMP2, amount_cents: 90, status: 'succeeded' },
+    ],
+    now: NOW,
+  });
+  assert.equal(r.status, 'pass');
+});
+
+test('ML52: approved review whose impression has NO succeeded charge does not fire (sub-50c leg never charged → nothing to refund)', () => {
+  const r = evalReversedChargeUnrefunded({
+    reviews: [{ id: 'rv1', impression_id: IMP1, reviewed_at: iso(GRACE + 10_000), refund_queued: false, status: 'approved' }],
+    charges: [], // no succeeded charge for IMP1
+    now: NOW,
+  });
+  assert.equal(r.status, 'pass');
+});
+
+test('ML53: a NULL-impression approved review (CPC/no linked impression) never fires — the refund path cannot act on it', () => {
+  const r = evalReversedChargeUnrefunded({
+    reviews: [{ id: 'rv1', impression_id: null, reviewed_at: iso(GRACE + 10_000), refund_queued: false, status: 'approved' }],
+    charges: [{ id: 'ch1', impression_id: IMP1, amount_cents: 110, status: 'succeeded' }],
+    now: NOW,
+  });
+  assert.equal(r.status, 'pass');
+});
+
+test('ML54: grace boundary — age === grace does NOT fire; grace + 1ms DOES (mirrors payout_stuck)', () => {
+  const atBoundary = evalReversedChargeUnrefunded({
+    reviews: [{ id: 'rv1', impression_id: IMP1, reviewed_at: iso(GRACE), refund_queued: false, status: 'approved' }],
+    charges: [{ id: 'ch1', impression_id: IMP1, amount_cents: 110, status: 'succeeded' }],
+    now: NOW,
+  });
+  assert.equal(atBoundary.status, 'pass');
+
+  const overBoundary = evalReversedChargeUnrefunded({
+    reviews: [{ id: 'rv1', impression_id: IMP1, reviewed_at: iso(GRACE + 1), refund_queued: false, status: 'approved' }],
+    charges: [{ id: 'ch1', impression_id: IMP1, amount_cents: 110, status: 'succeeded' }],
+    now: NOW,
+  });
+  assert.equal(overBoundary.status, 'fail');
+});
+
+test('ML55: a freshly-approved review still inside the grace does not fire (a normally-chained refund flips refund_queued first)', () => {
+  const r = evalReversedChargeUnrefunded({
+    reviews: [{ id: 'rv1', impression_id: IMP1, reviewed_at: iso(60_000), refund_queued: false, status: 'approved' }],
+    charges: [{ id: 'ch1', impression_id: IMP1, amount_cents: 110, status: 'succeeded' }],
+    now: NOW,
+  });
+  assert.equal(r.status, 'pass');
+});
+
+test('ML56: unparseable reviewed_at fails loud (treated as past grace, age_ms=null)', () => {
+  const r = evalReversedChargeUnrefunded({
+    reviews: [{ id: 'rv1', impression_id: IMP1, reviewed_at: 'garbage', refund_queued: false, status: 'approved' }],
+    charges: [{ id: 'ch1', impression_id: IMP1, amount_cents: 110, status: 'succeeded' }],
+    now: NOW,
+  });
+  assert.equal(r.status, 'fail');
+  assert.equal(r.alerts[0].payload.age_ms, null);
+});
+
+test('ML57: a non-succeeded charge in the list is ignored (defensive; edge pre-filters to succeeded)', () => {
+  const r = evalReversedChargeUnrefunded({
+    reviews: [{ id: 'rv1', impression_id: IMP1, reviewed_at: iso(GRACE + 10_000), refund_queued: false, status: 'approved' }],
+    charges: [{ id: 'ch1', impression_id: IMP1, amount_cents: 110, status: 'pending' }],
+    now: NOW,
+  });
+  assert.equal(r.status, 'pass');
+});
+
+test('ML58: independent unrefunded reviews each alert with their own dedup key; empty inputs pass; grace default is 1h', () => {
+  const both = evalReversedChargeUnrefunded({
+    reviews: [
+      { id: 'rv1', impression_id: IMP1, reviewed_at: iso(GRACE + 1), refund_queued: false, status: 'approved' },
+      { id: 'rv2', impression_id: IMP2, reviewed_at: iso(GRACE + 1), refund_queued: false, status: 'approved' },
+    ],
+    charges: [
+      { id: 'ch1', impression_id: IMP1, amount_cents: 110, status: 'succeeded' },
+      { id: 'ch2', impression_id: IMP2, amount_cents: 90, status: 'succeeded' },
+    ],
+    now: NOW,
+  });
+  assert.equal(both.status, 'fail');
+  assert.deepEqual(both.alerts.map((a) => a.dedup_key).sort(), ['review:rv1', 'review:rv2']);
+
+  assert.equal(evalReversedChargeUnrefunded({ reviews: [], charges: [], now: NOW }).status, 'pass');
+  assert.equal(REVERSED_CHARGE_UNREFUNDED_GRACE_MS, 60 * 60 * 1000);
+});
+
+test('ML59: reversed_charge_unrefunded is in CHECK_NAMES (deployable check set)', () => {
+  assert.ok(CHECK_NAMES.includes('reversed_charge_unrefunded'));
 });
