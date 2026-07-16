@@ -44,6 +44,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import {
   bearerHeader,
   forwardRpc,
+  serviceRpc,
   SUPABASE_URL,
   SERVICE_ROLE_KEY,
 } from "../_shared/jwt.ts";
@@ -348,6 +349,20 @@ async function markPendingCharged(
   });
 }
 
+// Promote a PREPAY batch's reserved rows onto a balance draw-down (no Stripe PI): settled_via='balance'
+// + stripe_charge_id stays NULL, so /refund routes to the balance-clawback path and /reconcile (which
+// counts only source=lumaline PIs) never sees them. Filtered on status=eq.pending like markPendingCharged.
+async function markPendingChargedBalance(entryGroupIds: string[]): Promise<void> {
+  if (entryGroupIds.length === 0) return;
+  await svc("PATCH", "advertiser_charges", {
+    body: {
+      status: "succeeded", settled_via: "balance", attempted_at: new Date().toISOString(),
+    },
+    query:  `entry_group_id=in.(${entryGroupIds.join(",")})&status=eq.pending`,
+    prefer: "return=minimal",
+  });
+}
+
 // Terminal-fail a batch's reserved rows — ONLY for a definitive decline. Ambiguous errors
 // (network/timeout, where the PI may exist) deliberately leave the rows pending so a recovery run
 // retries idempotently with the SAME batch key.
@@ -371,6 +386,7 @@ interface BatchAdvertiser {
   advertiser_name: string | null;
   stripe_customer_id: string | null;
   is_house: boolean;
+  billing_mode: string;   // 'postpay' (Stripe PI) | 'prepay' (draw-down); M9
 }
 
 // Settle an ALREADY-RESERVED batch onto ONE PaymentIntent, using an already-resolved customer + PM.
@@ -481,7 +497,7 @@ async function resolveCustomerAndPm(
 async function chargeFreshBatch(plan: AdvertiserPlan): Promise<Record<string, unknown>> {
   const adv: BatchAdvertiser = {
     advertiser_id: plan.advertiser_id, advertiser_name: plan.advertiser_name,
-    stripe_customer_id: plan.stripe_customer_id, is_house: false,
+    stripe_customer_id: plan.stripe_customer_id, is_house: false, billing_mode: "postpay",
   };
   const resolved = await resolveCustomerAndPm(adv);
   if ("skip" in resolved) {
@@ -510,6 +526,75 @@ async function recoverBatch(batchId: string, adv: BatchAdvertiser): Promise<Reco
   return await settleReservedBatch(batchId, adv, resolved.customerId, resolved.pm);
 }
 
+// ---- Prepay draw-down settle (M9) -------------------------------------------
+// Settle an already-reserved PREPAY batch by drawing down the advertiser's prepay credit instead of
+// creating a Stripe PaymentIntent. The DB primitive app.advertiser_draw_down_batch is idempotent on
+// charge_batch_id (a retry/recovery re-draws ONCE), atomic + never-negative (draws nothing when the
+// balance is short), and fires the loud reserved_underflow / insufficient_balance alarms itself. On:
+//   * drawn / duplicate  → mark the batch's rows succeeded via balance (stripe_charge_id NULL).
+//   * insufficient       → pause the advertiser's line_items (stop serving) and LEAVE the batch
+//                          pending+undrawn so a later run retries after a top-up (retryable, never
+//                          terminal-fail — matching the Stripe ambiguous-error policy).
+async function settlePrepayBatch(batchId: string, adv: BatchAdvertiser): Promise<Record<string, unknown>> {
+  const chargeSet = await reselectByBatch(batchId);
+  if (chargeSet.length === 0) {
+    return { advertiser_id: adv.advertiser_id, status: "skipped", reason: "nothing_pending", batch_id: batchId };
+  }
+  const ids = chargeSet.map((g) => g.entry_group_id);
+
+  // Defense: a prepay advertiser is never is_house (ensure_advertiser_user forces false), but never
+  // draw a house/sentinel batch — release it back to the view (mirrors the Stripe invariant #1).
+  if (adv.is_house) {
+    await releaseBatch(ids);
+    return { advertiser_id: adv.advertiser_id, status: "skipped", reason: "house_advertiser", batch_id: batchId };
+  }
+
+  const sumMicros = chargeSet.reduce((a, g) => a + Number(g.amount_micros), 0);
+
+  // Draw down under the DB primitive (runs inside the caller's single-flight billing_lock).
+  const draw = await serviceRpc("advertiser_draw_down_batch", {
+    p_advertiser: adv.advertiser_id, p_batch: batchId, p_sum: sumMicros,
+  });
+  const res = (draw.data ?? {}) as { drawn?: boolean; reason?: string };
+
+  if (draw.ok && (res.drawn === true || res.reason === "duplicate")) {
+    // drawn now, OR already drawn by a prior run (recovery) — settle the reserved rows idempotently.
+    await markPendingChargedBalance(ids);
+    return {
+      advertiser_id: adv.advertiser_id, status: "succeeded", settled_via: "balance",
+      amount_micros: sumMicros, group_count: chargeSet.length, batch_id: batchId,
+      ...(res.reason === "duplicate" ? { reason: "duplicate" } : {}),
+    };
+  }
+
+  if (res.reason === "insufficient_balance") {
+    // Solvency: the RPC already fired the loud critical alarm. Pause serving; leave the batch pending
+    // (undrawn) for a retry after top-up. NOT terminal-failed — this is a fundable, retryable state.
+    await pauseAdvertiserLineItems(adv.advertiser_id);
+    return {
+      advertiser_id: adv.advertiser_id, status: "skipped", reason: "insufficient_balance",
+      amount_micros: sumMicros, group_count: chargeSet.length, batch_id: batchId,
+    };
+  }
+
+  // nothing_to_draw / RPC error — leave the batch pending for a later retry (never charge twice).
+  return {
+    advertiser_id: adv.advertiser_id, status: "skipped",
+    reason: res.reason ?? "draw_down_failed", batch_id: batchId,
+  };
+}
+
+// FRESH prepay charge from a plan: no Stripe customer/PM resolution — mint a batch, reserve, draw down.
+async function chargePrepayBatch(plan: AdvertiserPlan): Promise<Record<string, unknown>> {
+  const adv: BatchAdvertiser = {
+    advertiser_id: plan.advertiser_id, advertiser_name: plan.advertiser_name,
+    stripe_customer_id: plan.stripe_customer_id, is_house: false, billing_mode: "prepay",
+  };
+  const batchId = crypto.randomUUID();
+  await reservePending(plan.groups, plan.advertiser_id, batchId);
+  return await settlePrepayBatch(batchId, adv);
+}
+
 interface UnchargedRow {
   entry_group_id:    string;
   event_type:        string;
@@ -523,6 +608,7 @@ interface UnchargedRow {
   is_house:          boolean;
   stripe_customer_id: string | null;
   cleared_at:        string;
+  billing_mode:      string;   // M9: 'prepay' routes to draw-down, not a Stripe PI
 }
 
 Deno.serve(async (req) => {
@@ -575,6 +661,13 @@ Deno.serve(async (req) => {
             advertiser_id: plan.advertiser_id, status: "skipped", reason: "below_stripe_minimum",
             amount_micros: plan.sumMicros, amount_cents: plan.sumCents, group_count: plan.groups.length,
           });
+        } else if (plan.action === "draw_prepay") {
+          // Prepay has no Stripe minimum (exact-micros draw-down) — preview the intended draw.
+          results.push({
+            advertiser_id: plan.advertiser_id, advertiser_name: plan.advertiser_name,
+            settled_via: "balance", amount_micros: plan.sumMicros, group_count: plan.groups.length,
+            would_draw: true,
+          });
         } else {
           results.push({
             advertiser_id: plan.advertiser_id, advertiser_name: plan.advertiser_name,
@@ -615,15 +708,22 @@ Deno.serve(async (req) => {
           continue;
         }
         const advRes = await svc("GET", "advertisers", {
-          query: `id=eq.${batch.advertiser_id}&select=name,stripe_customer_id,is_house&limit=1`,
+          query: `id=eq.${batch.advertiser_id}&select=name,stripe_customer_id,is_house,billing_mode&limit=1`,
         });
         const a = (Array.isArray(advRes.data) ? advRes.data[0] : null) as
-          | { name?: string; stripe_customer_id?: string | null; is_house?: boolean }
+          | { name?: string; stripe_customer_id?: string | null; is_house?: boolean; billing_mode?: string }
           | null;
-        results.push(await recoverBatch(batchId, {
+        const recAdv: BatchAdvertiser = {
           advertiser_id: batch.advertiser_id, advertiser_name: a?.name ?? null,
           stripe_customer_id: a?.stripe_customer_id ?? null, is_house: a?.is_house === true,
-        }));
+          billing_mode: a?.billing_mode ?? "postpay",
+        };
+        // Route a recovered PREPAY batch to the draw-down (no Stripe PM), postpay to the Stripe path.
+        results.push(
+          recAdv.billing_mode === "prepay"
+            ? await settlePrepayBatch(batchId, recAdv)
+            : await recoverBatch(batchId, recAdv),
+        );
       }
 
       // MAIN: fresh plans. Their charge groups are disjoint from any recovered batch (the view
@@ -652,6 +752,14 @@ Deno.serve(async (req) => {
             advertiser_id: plan.advertiser_id, status: "skipped", reason: "below_stripe_minimum",
             amount_micros: plan.sumMicros, amount_cents: plan.sumCents, group_count: plan.groups.length,
           });
+          continue;
+        }
+        if (plan.action === "draw_prepay") {
+          // PREPAY: reserve + draw down the balance (no Stripe PI, no 50-cent minimum).
+          results.push(await chargePrepayBatch({
+            advertiser_id: plan.advertiser_id, advertiser_name: plan.advertiser_name,
+            stripe_customer_id: plan.stripe_customer_id, groups: plan.groups,
+          }));
           continue;
         }
         results.push(await chargeFreshBatch({
@@ -781,7 +889,8 @@ Deno.serve(async (req) => {
   if (req.method === "POST" && path.endsWith("/refund")) {
     // Re-gate this money-mutating route to the aal2 money-admin tier (the top-level
     // requireAdmin only proves app.admins membership; a refund moves real cash).
-    if (!(await requireMoneyAdmin(req))) return jsonErr("Forbidden", 403);
+    const moneyAuth = await requireMoneyAdmin(req);
+    if (!moneyAuth) return jsonErr("Forbidden", 403);
 
     let refundBody: Record<string, unknown> = {};
     try { refundBody = await req.json(); } catch { /* empty body ok */ }
@@ -811,7 +920,7 @@ Deno.serve(async (req) => {
 
     // 2. Find the succeeded charge for this impression.
     const chargeRes = await svc("GET", "advertiser_charges", {
-      query: `impression_id=eq.${impressionId}&status=eq.succeeded&select=stripe_charge_id,amount_cents&limit=1`,
+      query: `impression_id=eq.${impressionId}&status=eq.succeeded&select=stripe_charge_id,amount_cents,settled_via&limit=1`,
     });
     if (!chargeRes.ok) {
       return jsonErr("Failed to fetch advertiser_charges", chargeRes.status, chargeRes.data);
@@ -823,6 +932,34 @@ Deno.serve(async (req) => {
     const charge = chargeRows[0];
     const piId        = charge.stripe_charge_id as string | null;
     const amountCents = Number(charge.amount_cents ?? 0);
+    const settledVia  = (charge.settled_via as string | null) ?? "stripe";
+
+    // BALANCE-settled (prepay draw-down): NEVER a Stripe refund — route to admin_prepay_clawback,
+    // which reverses the accrual AND re-credits the advertiser's prepay balance (zero-sum). Forward
+    // the caller's aal2 money-admin bearer so the RPC's in-body is_money_admin() gate passes (a
+    // service_role call would fail it). This is the "branch on settled_via, never both" refund fix.
+    if (settledVia === "balance") {
+      const { status, text } = await forwardRpc(
+        "admin_prepay_clawback",
+        { p_impression_id: impressionId, p_reason: `refund:review_${reviewId}` },
+        moneyAuth,
+      );
+      if (status !== 200) {
+        return jsonErr("Balance clawback failed", status === 403 ? 403 : 502, text);
+      }
+      let cb: Record<string, unknown> = {};
+      try { cb = JSON.parse(text); } catch { /* non-JSON body */ }
+      if (cb.ok === false) {
+        // A guarded refusal (payout_active / earning_already_paid) — surface it, do NOT queue.
+        return jsonOk({ ok: false, settled_via: "balance", clawback: cb, impression_id: impressionId }, 200);
+      }
+      await svc("PATCH", "clawback_reviews", {
+        body:   { refund_queued: true },
+        query:  `id=eq.${reviewId}`,
+        prefer: "return=minimal",
+      });
+      return jsonOk({ ok: true, settled_via: "balance", clawback: cb, impression_id: impressionId });
+    }
 
     if (!piId) {
       return jsonErr("Stripe PaymentIntent id missing on advertiser_charges row", 422);

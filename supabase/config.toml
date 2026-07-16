@@ -453,6 +453,17 @@ verify_jwt = false
 [functions.monitor]
 verify_jwt = false
 
+# advertiser-portal — advertiser prepay funding surface (M9-T9). verify_jwt=false because this
+# function manages auth per-route itself: the /webhook route is UNAUTHENTICATED and authenticated
+# ONLY by the Stripe signature (a SEPARATE endpoint secret ADVERTISER_STRIPE_WEBHOOK_SECRET), and
+# /funding/checkout resolves the caller's own advertiser via forwardRpc('advertiser_self_id') + the
+# forwarded bearer (a body advertiser_id is ignored). Owns ONLY the advertiser Stripe deposit path;
+# all advertiser reads/CRUD go direct via PostgREST under RLS. Secrets in Supabase Vault:
+# STRIPE_SECRET_KEY=sk_test_*, ADVERTISER_STRIPE_WEBHOOK_SECRET=whsec_* (separate from payouts),
+# LUMALINE_APP_URL, ADVERTISER_MIN/MAX_DEPOSIT_MICROS (owner-tuned at deploy).
+[functions.advertiser-portal]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327
