@@ -92,13 +92,18 @@ test('CPC-2: /billing/charge bills the cleared cpc group exactly once; re-runnin
     );
     assert.ok(groupId);
 
-    // dry_run must list our specific group as a would-charge candidate.
+    // dry_run must list our group as a would-charge candidate. Since per-advertiser aggregation
+    // (fix/billing-aggregation), a dry_run result is a per-ADVERTISER plan — the individual
+    // entry_group_ids are folded into it and only the skip_house branch still emits a per-group
+    // row with entry_group_id (billing/index.ts:649-677). So assert our advertiser's plan is a
+    // would_charge covering >=1 group, the same way billing-charge-counts T46 does. (Asserting a
+    // top-level r.entry_group_id here was structurally unsatisfiable for a non-house advertiser.)
     const dry = await svc('POST', 'functions/v1/billing/charge?dry_run=true');
     assert.ok(dry.counts.would_charge >= 1, `dry_run must list at least our cpc group: ${JSON.stringify(dry.counts)}`);
-    assert.ok(
-      dry.results.some((r) => r.entry_group_id === groupId),
-      'dry_run results must include our specific cpc group',
-    );
+    const plan = dry.results.find((r) => r.advertiser_id === advertiserId);
+    assert.ok(plan, `dry_run results must include a plan for our advertiser: ${JSON.stringify(dry.results)}`);
+    assert.equal(plan.would_charge, true, `our advertiser's aggregate (€1.00 > €0.50 min) must be a would_charge: ${JSON.stringify(plan)}`);
+    assert.ok(plan.group_count >= 1, `the plan must cover our cpc group: ${JSON.stringify(plan)}`);
 
     // Real run #1 bills it exactly once (status may be succeeded/failed/skipped depending on
     // whether STRIPE_SECRET_KEY is configured in this environment — what matters for dedup is
