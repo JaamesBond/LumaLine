@@ -1,8 +1,12 @@
 # LumaLine — AS-BUILT Reconciliation & Deferral Ledger
 
 **Status:** Authoritative map of what *is built* vs. what the older design docs *describe*.
-**As of:** 2026-07-01 (milestone **M4** DONE — branded domain + CPC money-path (TEST) + **GA npm publish `lumaline@0.1.0` LIVE**; see §5c).
-**Branch:** `feat/m4-cpc-and-branded-url` (based on `main` after PR #9). Earlier milestones: M0 `feat/m0-production-rails`.
+**As of:** 2026-07-05. **M0–M4 DONE + merged.** **M5 (test→live money cutover) effectively LIVE** —
+first real advertiser charge **€1.10 settled + reconciled 2026-07-04** (§5d); auto-payout rails
+merged. **M6 (ops/observability/transparency) largely merged** (§5e). **M7 (self-serve dashboards)**
+in progress — the **publisher portal is built + e2e-verified, not yet committed/deployed** (§5f).
+**Branch (current):** `feat/m7-publisher-portal` (M7 backend, uncommitted). `main` HEAD `369bd47`
+(PR #32 auto-payout). Earlier: M4 `feat/m4-cpc-and-branded-url`, M0 `feat/m0-production-rails`.
 **Backend project:** Supabase `prmsonskzrubqsazmpwd` (the LumaLine project — **not** the unrelated CRM `kvlfpwzmjxuapjheknnj`).
 
 > Read **this** doc and the **code** for what *is*. Read `docs/` for what's *planned*. Where the two
@@ -434,6 +438,96 @@ were clean before publish. Future GA bumps: version bump → merge to `main` →
 
 ---
 
+## 5d. M5 as-built deltas (production money GO-LIVE — test→live cutover, REAL money)
+
+M5 is the single, fully-gated test→live cutover. It is **effectively live**: real charges settle on
+`sk_live`. See memory `[[lumaline-production-handoff-plan]]` for the blow-by-blow.
+
+- **M5-T3 — FIRST REAL CHARGE ✅ 2026-07-04.** **€1.10 collected on a real live card** (PI
+  `pi_3TpUM5CChUMF5SBO015yREeI`, batch `6b09f5ad…`), **22 CPVA impressions aggregated into ONE
+  PaymentIntent**, `/reconcile` **GREEN** (discrepancy 0), owner received the Stripe email. The charge
+  blocker was fixed first: per-advertiser aggregation via a stable `charge_batch_id` + single-flight
+  lock — migration **`20260704140000_billing_aggregate_batch.sql`** (on prod, billing fn redeployed,
+  PR #31 `fix/billing-aggregation`). Adversarial review found + closed F1 double-charge / F2 no-lock /
+  F3 stranded batch / F5 house before the GO.
+- **Related prod fixes:** the **refresh-token crash-mid-rotation** grace window
+  `20260704120000_refresh_token_grace_window.sql` (Auth0-style reuse-interval, PR #30); the
+  **dwell-latency under-credit** ("dwell too short" at edge latency) — client **0.1.2** +
+  `20260703010000_close_window_dwell_tolerance.sql` (2026-07-03); auth email via **Resend SMTP** on
+  `send.lumaline.dev` + the `/activate` page consuming the magic link + auto-approving (2026-07-03).
+- **M5-T4 — first REAL payout: rails MERGED (PR #32 `feat/m5-t4-auto-payout`), first payout PENDING.**
+  Migration **`20260704150000_auto_payout.sql`** — weekly `run_payout` pg_cron target, `connect_nudge_at`
+  + publisher-contact/nudge-candidate RPCs; branded **paid / connect-nudge emails** (`_shared/email.mjs`).
+  The first real payout was blocked on accrual (publisher 60% = €0.66 < the €25 default min) → needs more
+  accrual or a lower `LUMALINE_PAYOUT_MIN_MICROS` (the edge default is €1). **Prod deploy of the
+  auto-payout migration is owner-gated (M5-T4 runbook, commit `0e55541`) — verify current prod state at
+  session start.**
+- **M5-T6 — money-path monitoring ✅.** `monitor` edge fn + `app.alert_events` (migration
+  `20260702010000_money_monitoring.sql`): ledger zero-sum, stuck/failed payouts, failed charges,
+  billing+payout recon-drift; alert emails on state change; `app.run_monitor` cron.
+- **M5-T7 — independent external security review:** owner-gated; **status unverified in-repo** — confirm.
+
+## 5e. M6 as-built deltas (scale / ops / observability + transparency)
+
+The safe (non-money-path) slice of M6 is merged; the money-touching parts are deferred behind M5
+validation.
+
+- **M6-T1 — dashboards + on-call runbook ✅ (PR #28).** Read-only ops tooling `scripts/ops/*`
+  (`dashboard.mjs`, `watch-billing.mjs`, `sql.mjs`) + the on-call runbook (`docs/ops/oncall-runbook.md`).
+- **M6-T5 — public transparency / clearing report ✅ (PR #28).** `scripts/ops/transparency-report.mjs`
+  → `docs/transparency-report.{json,md}`, reconciles to the ledger, non-PII (closes deferral **D1**).
+- **M6-T2 — window-protocol load harness ✅ built + merged (PR #29 `m6/t2-load-harness`).**
+  `scripts/load/harness.mjs` + libs; guarded "build local, DO NOT run vs prod" — the **run against prod
+  is owner-gated**.
+- **M6-T3 — richer IVT + activity-delta envelope: DEFERRED** (`DEPENDS-ON: M5` — edits the live
+  clearing/clawback path; unblock only after M5 charge/payout validated).
+- **M6-T4 — advertiser API keys: DEFERRED** (avoid a new prod migration during money validation).
+
+## 5f. M7 as-built deltas (self-serve dashboards — PUBLISHER portal built, NOT deployed)
+
+**M7 = go-wide self-serve dashboards** (publisher → owner → advertiser). Three sub-projects, each its
+own brainstorm→spec→plan→build. Plan: `~/.claude/plans/look-at-m7-and-harmonic-wreath.md`. Scope doc:
+`docs/superpowers/2026-07-05-dashboards-planning-handoff.md`. Memory: `[[m7-publisher-portal]]`.
+
+**Publisher portal — BUILT + e2e-verified 2026-07-05; NOT committed/deployed.** Backend work is
+uncommitted on branch **`feat/m7-publisher-portal`**; frontend lives in the separate marketing repo
+`~/projects/luma-line-edf7d51e` working tree. Locked decisions: portal lives as authed `/app/*` routes
+**inside the Lovable marketing repo** (TanStack Start + shadcn); web auth = a **direct Supabase Auth
+session** (magic-link) → `auth.uid()` RLS ("Scheme A"), NOT the CLI device JWT; advertiser prepay +
+CPVA-only were chosen for the later advertiser portal.
+
+- **Backend (3 migrations + 2 test suites, `node --test` 18/18 green after local `db reset`):**
+  - `20260705120000_gdpr_self_delete.sql` — self-serve erasure. Extracts the shared erasure body into
+    `app.gdpr_erase_publisher(uuid)`; admin `gdpr_delete_publisher(uuid)` now delegates; new
+    `public.gdpr_self_delete()` takes **no arg**, self-derives from `app.current_publisher_id()` (can't
+    target another publisher), keeps the payout-in-flight guard + anonymize-in-place. Granted `authenticated`.
+  - `20260705130000_publisher_earnings_summary.sql` — SECURITY DEFINER STABLE, self-scoped; returns
+    `{matured,held,lifetime,paid,balance}_micros`. `matured` reuses `app.publisher_payable_micros(pid,'7 days')`
+    so the number shown agrees with what a payout actually pays; `held = balance − matured`.
+  - `20260705140000_v_publisher_devices.sql` — view omitting `refresh_token_hash` (`security_invoker=on`),
+    so the exclusion is DB-enforced, not client discipline.
+  - Tests: `test/gdpr-self-delete.integration.mjs` (S1–S8), `test/publisher-earnings-summary.integration.mjs`
+    (E1–E4). Existing `gdpr-deletion.integration.mjs` stays green (refactor-safe).
+- **Frontend (Lovable-safe: all new code under `src/routes/app/*`, `src/routes/{login,payouts/onboard}.tsx`,
+  and `src/features/app/*`; never touches `src/integrations/supabase/*`; uses the isolated `lumaline`
+  client only).** Pages: Overview, Earnings, Payouts + bank-connect (3-state onboard badge +
+  `/payouts/onboard` return route), Setup, Account (devices revoke + delete danger flow). `ssr:false` +
+  a client-aware tri-state auth gate. `npm run build` passes.
+- **e2e-verified via Playwright against the local stack** (a demo publisher seeded with earnings): unauth
+  `/app`→`/login`; authed pages render correct RLS data via the web session (earnings summary, window
+  clearing, devices view, payouts, connect status); the delete flow proved **both** the payout-in-flight
+  refusal AND success (DB anonymized, devices gone, ledger preserved, email tombstoned); open-redirect
+  ignored; no `refresh_token_hash` leak; 0 console errors; no secrets in the client bundle.
+- **Owner-gated to ship:** commit the branch + PR; deploy the 3 migrations to `prmsonskzrubqsazmpwd`;
+  set `LUMALINE_APP_URL` = the portal origin; pin the Supabase Auth redirect allow-list to
+  `<origin>/{app,activate,payouts/onboard}` (**no wildcard**); confirm `LUMALINE_PAYOUT_MIN_MICROS`;
+  then push the marketing repo → Lovable deploys (owner merges — self-PR is auto-denied). Brand = the
+  teal→emerald gradient (`--accent-to` ≈ #10B981), **not** the flat #16A34A the scope doc named.
+- **Still to build (own sub-projects):** the **owner dashboard** (admin-gated read views over
+  recon/ledger/monitor + audited clawback/dispute RPCs — medium) and the **advertiser portal** (NEW
+  identity `advertiser_users` + RLS isolation, prepay balance, re-scoped `admin-booking` RPCs, CPVA-only,
+  guard rails against house/sentinel — largest, most review).
+
 ## 6. Deferral ledger
 
 Genuine deferrals, recorded so none is silently lost. Each names the **reason** and the **milestone/owner**
@@ -441,13 +535,13 @@ that closes it.
 
 | ID | Deferred item | Reason it's safe to defer | Closes at |
 |---|---|---|---|
-| **D1** | **Public transparency / clearing report** (aggregate fill, credited views, clearing prices, publisher-share %, clawback rate). | **This is the product thesis** — transparency is the whole pitch vs. invasive monetizers — so it is **explicitly tracked, never dropped**. It needs real cleared traffic to report on, which only exists after paid demand (M2) and go-live (M5). Figures must reconcile to the ledger and stay non-PII (data-minimization invariant). | **M6** (M6-T5) |
+| **D1** | **Public transparency / clearing report** (aggregate fill, credited views, clearing prices, publisher-share %, clawback rate). | **This is the product thesis** — transparency is the whole pitch vs. invasive monetizers — so it is **explicitly tracked, never dropped**. It needs real cleared traffic to report on, which only exists after paid demand (M2) and go-live (M5). Figures must reconcile to the ledger and stay non-PII (data-minimization invariant). | ✅ **DONE — M6-T5** (PR #28): `scripts/ops/transparency-report.mjs` → `docs/transparency-report.{json,md}`, reconciles to the ledger. |
 | **D2** | **Second-price auction.** | With a **single advertiser**, a full second-price auction is dead code. **First-price / reserve-floor clears today.** The schema **retains the clearing-price column** so the second-price upgrade is **non-breaking** when multiple advertisers exist. | **Post-multi-advertiser** (designed into M2-T1 serving) |
 | **D3** | **Next-key private custody in Vault.** | The `keyid` mechanism + the **public** next key (`31433cdee001fc81`) ship now so clients trust it *before* the feed flips. | ✅ **DONE 2026-06-29** — next private stored in Vault as `LUMALINE_ED25519_NEXT_PRIVATE_KEY` (byte-verified vs the local PEM), disk copy shredded. |
 | **D4** | **`schema_migrations` history repair** (the 2 out-of-band versions + the drift-capture row). | Objects/grants were already live and the migrations are idempotent; the gap was the **history table** only. | ✅ **DONE 2026-06-29** — history reconciled to **13** versions; future `db push` is clean. |
 | **D5** | **Per-publisher earnings / payouts** (device-code `lumaline login`, attribution off the sentinel, Stripe charging + Connect payouts, money-safety gates, independent security review). | The beta is intentionally **sentinel-only, `gross = 0`, never billed** — *see it live today, not get paid today*. The full money machine is built + proven in **Stripe test mode** before a single real dollar moves, behind legal and security gates. | **M1–M3** (test mode), **M5** (live go-live) |
 | **D6** | **Branded domain + CPC measurement + GA npm publish.** | Installed clients don't self-update, so GA must ship on the **stable branded URL** and **rotation-safe** (the M0 `keyid` work is its hard prerequisite). Until then the beta installs via `npm i -g github:JaamesBond/LumaLine`. CPC is also gated by upstream OSC-8 bug #26356 (clicks in IDE terminals only today). | **M4 — ✅ DONE 2026-07-01** (§5c): branded domain + CPC money-path + **GA npm publish `lumaline@0.1.0` LIVE** (SLSA provenance). |
-| **D7** | **Scale / ops deferrals:** load-test validation of the ~15k writes/s ceiling, richer IVT heuristics (data-min-safe), advertiser API keys, full dashboards/on-call runbook, DR-at-scale. | Not on the money-honesty critical path; the money-critical alerts (ledger-imbalance, payout-failure, reconciliation) land earlier at M3-T6. | **M6** |
+| **D7** | **Scale / ops deferrals:** load-test validation of the ~15k writes/s ceiling, richer IVT heuristics (data-min-safe), advertiser API keys, full dashboards/on-call runbook, DR-at-scale. | Not on the money-honesty critical path; the money-critical alerts (ledger-imbalance, payout-failure, reconciliation) land earlier at M3-T6. | **M6 — PARTIAL.** ✅ dashboards/runbook (M6-T1) + transparency (M6-T5) + load harness *built* (M6-T2, PR #29). ⏳ load-run vs prod owner-gated; richer IVT (M6-T3) + advertiser API keys (M6-T4) DEFERRED behind M5 validation. |
 | **D8** | **M1 — orphaned `open` window** when a revoked device's `window_open` is retried under the sentinel (the client keeps sending its real token, so the sentinel window's beats/close 401 and it never closes). | **Harmless:** `gross=0`, never credits, no double-bill, no crash; the access token expires in ≤15 min and the existing Phase-4 `sweep_stale_windows` cron abandons stale-open rows. | **M4/M6** (optional: signal client demotion in the open reply) |
 | **D9** | **M1 — refresh token has no absolute lifetime + no reuse-detection** (OAuth refresh-rotation BCP). | Bounded by the short **900s** access TTL, 0600 at-rest storage, **manual `device_revoke`**, and the per-window `revoked_at` re-check on the billing path. No payouts until M5. | **M3** (security review): add `devices.refresh_expires_at` + superseded-hash reuse detection → auto-revoke device family |
 | **D10** | **M1 — `/earnings` does not re-check `devices.revoked_at`** (a token minted just before logout can read its *own* earnings until exp ≤15 min). | **Self-data only**, RLS-scoped to the caller; zero billing/cross-publisher impact; time-bounded by the short TTL. | **M3** (add a server-side `revoked_at` check on the `/earnings` handler) |
@@ -473,9 +567,12 @@ that closes it.
 
 ## 8. Pointers
 
-- **What IS (code):** `src/statusline.mjs`, `src/client/window.mjs`, `src/lib/crypto.mjs`,
-  `src/lib/keyring.mjs`, `src/config.mjs`; `supabase/migrations/` (12 + the drift-capture migration);
-  `supabase/functions/` (`lumaline-feed`, `click`, `window-open|beat|close`, `_shared`); `test/` (49 tests).
+- **What IS (code):** `src/statusline.mjs`, `src/client/window.mjs`, `src/client/auth.mjs`,
+  `src/lib/{crypto,keyring,url}.mjs`, `src/config.mjs`; `supabase/migrations/` (**34 on `main`** + 3
+  uncommitted M7 = 37 on disk); `supabase/functions/` (`lumaline-feed`, `auth-device`, `billing`,
+  `stripe-connect`, `monitor`, `admin-booking`, `click`, `window-open|beat|close`, `_shared`); `test/`
+  (**49 files** — hermetic unit ≈147 + integration that self-skip without a local stack; the count only grows).
+  **NB:** §4's "49 tests" table is the M0-era snapshot, not the current total.
 - **What's PLANNED (docs):** `docs/superpowers/plans/2026-06-28-production-readiness-handoff.md`
   (**plan of record**, M0–M6); `docs/superpowers/specs/2026-06-27-verification-and-economics-design.md`
   (money + threat model).
