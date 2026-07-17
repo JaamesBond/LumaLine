@@ -32,7 +32,12 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 const clearingSQL     = readFileSync(join(ROOT, 'supabase/migrations/20260627033345_clearing_and_ledger.sql'), 'utf8');
 const clawbackSQL     = readFileSync(join(ROOT, 'supabase/migrations/20260629070000_clawback_review.sql'), 'utf8');
-const moneyTimeline   = readFileSync(join(ROOT, 'docs/ops/money-timeline.md'), 'utf8');
+// docs/money-timeline.md, NOT docs/ops/. The pre-public hardening ignores docs/ops/ wholesale
+// (key custody, deploy commands, incident response — real recon value), which also swept up this
+// file and broke CI: the doc stayed present in the owner's working tree but vanished from a fresh
+// clone, so this suite passed locally and ENOENT'd in CI. It carries no secrets — only money
+// mechanics already visible in the public migrations — so it lives in the published docs/ root.
+const moneyTimeline   = readFileSync(join(ROOT, 'docs/money-timeline.md'), 'utf8');
 const billingFn       = readFileSync(join(ROOT, 'supabase/functions/billing/index.ts'), 'utf8');
 
 // ---------------------------------------------------------------------------
@@ -49,7 +54,7 @@ test('clawback: 72h clawback-immune window is in the clearing migration', () => 
 test('clawback: money-timeline.md documents the 72h clawback-immune point', () => {
   assert.ok(
     moneyTimeline.includes('72h') || moneyTimeline.includes('72 hours'),
-    "docs/ops/money-timeline.md must document the 72h clawback-immune point",
+    "docs/money-timeline.md must document the 72h clawback-immune point",
   );
 });
 
