@@ -68,14 +68,20 @@ export function partitionPendingByBatch(rows) {
  * PaymentIntent. A below-minimum AGGREGATE is a NON-terminal skip: it writes no charge row, so
  * the groups stay in the uncharged view and keep accumulating until the total clears the minimum.
  *
+ * PREPAY ROUTING (M9): a billing_mode='prepay' advertiser is settled by drawing down prepay
+ * credit (app.advertiser_draw_down_batch), NOT a Stripe PaymentIntent — so it has NO 50-cent
+ * Stripe minimum (draw-down is exact micros) and routes to action='draw_prepay' regardless of
+ * the sub-minimum aggregate. House is still skip_house; legacy postpay is unchanged.
+ *
  * @param {Array<{advertiser_id:string, advertiser_name?:string, is_house?:boolean,
- *   stripe_customer_id?:string|null, entry_group_id:string, amount_micros:number,
- *   impression_id?:string|null, publisher_id?:string|null}>} rows
+ *   stripe_customer_id?:string|null, billing_mode?:string|null, entry_group_id:string,
+ *   amount_micros:number, impression_id?:string|null, publisher_id?:string|null}>} rows
  * @param {{minCents?:number}} [opts]
  * @returns {Array<{advertiser_id:string, advertiser_name:string|null, is_house:boolean,
- *   stripe_customer_id:string|null, groups:Array<{entry_group_id:string, amount_micros:number,
- *   impression_id:string|null, publisher_id:string|null}>, entryGroupIds:string[],
- *   sumMicros:number, sumCents:number, action:'skip_house'|'skip_below_min'|'charge'}>}
+ *   billing_mode:string, stripe_customer_id:string|null, groups:Array<{entry_group_id:string,
+ *   amount_micros:number, impression_id:string|null, publisher_id:string|null}>,
+ *   entryGroupIds:string[], sumMicros:number, sumCents:number,
+ *   action:'skip_house'|'skip_below_min'|'charge'|'draw_prepay'}>}
  */
 export function planAdvertiserCharges(rows, { minCents = 50 } = {}) {
   const byAdv = new Map();
@@ -87,6 +93,7 @@ export function planAdvertiserCharges(rows, { minCents = 50 } = {}) {
         advertiser_id: id,
         advertiser_name: r.advertiser_name ?? null,
         is_house: r.is_house === true,
+        billing_mode: r.billing_mode ?? "postpay",
         stripe_customer_id: r.stripe_customer_id ?? null,
         groups: [],
         sumMicros: 0,
@@ -106,11 +113,38 @@ export function planAdvertiserCharges(rows, { minCents = 50 } = {}) {
     const sumCents = microsToCents(p.sumMicros);
     const action = p.is_house
       ? "skip_house"
-      : sumCents < minCents
-        ? "skip_below_min"
-        : "charge";
+      : p.billing_mode === "prepay"
+        ? "draw_prepay"
+        : sumCents < minCents
+          ? "skip_below_min"
+          : "charge";
     return { ...p, entryGroupIds: p.groups.map((g) => g.entry_group_id), sumCents, action };
   });
+}
+
+/**
+ * Pure decision for a prepay draw-down at billing-settle (mirrors app.advertiser_draw_down_batch's
+ * guards so a hermetic node --test can exercise the money logic even with the stack down):
+ *   - balance >= sum          → { draw:true }                        (draw the exact micros)
+ *   - balance <  sum          → { draw:false, reason:'insufficient_balance' } (pause, NO partial)
+ *   - reserved < sum (either) → reservedUnderflow:true               (LOUD signal; never hides drift)
+ * The draw-down itself is idempotent on charge_batch_id in the DB; this helper only decides.
+ * @param {{ balanceMicros:number, reservedMicros:number, sumMicros:number }} args
+ * @returns {{ draw:boolean, reason:'ok'|'insufficient_balance'|'nothing_to_draw',
+ *   reservedUnderflow:boolean, amountMicros:number }}
+ */
+export function planAdvertiserDrawDown({ balanceMicros, reservedMicros, sumMicros } = {}) {
+  const bal = Number(balanceMicros) || 0;
+  const res = Number(reservedMicros) || 0;
+  const sum = Number(sumMicros) || 0;
+  if (sum <= 0) {
+    return { draw: false, reason: "nothing_to_draw", reservedUnderflow: false, amountMicros: 0 };
+  }
+  const reservedUnderflow = res < sum;   // reserve accounting drifted low — always surfaced
+  if (bal < sum) {
+    return { draw: false, reason: "insufficient_balance", reservedUnderflow, amountMicros: 0 };
+  }
+  return { draw: true, reason: "ok", reservedUnderflow, amountMicros: sum };
 }
 
 /**
