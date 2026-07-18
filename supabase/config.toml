@@ -299,9 +299,14 @@ auth_token = "env(SUPABASE_AUTH_SMS_TWILIO_AUTH_TOKEN)"
 max_enrolled_factors = 10
 
 # Control MFA via App Authenticator (TOTP)
+# M8 owner dashboard: the aal2 money tier (app.is_money_admin() requires jwt aal='aal2') is
+# INERT until TOTP enroll/verify are enabled — a passwordless magic-link session is aal1.
+# Enabling them here is the mechanical half of the T0 prerequisite; the owner must still ENROLL
+# a TOTP factor and be seeded into app.money_admins before the harden-gates migration
+# (20260716120000) deploys, or the sole admin self-locks-out. See that migration's DO-block guard.
 [auth.mfa.totp]
-enroll_enabled = false
-verify_enabled = false
+enroll_enabled = true
+verify_enabled = true
 
 # Configure MFA via Phone Messaging
 [auth.mfa.phone]

@@ -25,6 +25,10 @@
 //                                     billing_recon_totals vs succeeded source=lumaline PIs).
 //   f. payout_recon_drift  CRITICAL — mirrors stripe-connect /reconcile exactly (DB
 //                                     payout_recon_totals vs transfers NET of reversals).
+//   g. reversed_charge_unrefunded HIGH — Phase-2 backstop: an APPROVED clawback_reviews row
+//                                     with a succeeded advertiser_charge still refund_queued=false
+//                                     past a 1h grace (books reversed but advertiser cash not
+//                                     returned) — fires before it becomes permanent recon drift.
 //   Recon checks scope to a trailing 35-day window ending now; the others are global
 //   (b) or 24h-scoped (c, d). Stripe unreachable -> that check reports status 'error'
 //   (HIGH alert; fail loud, never silently green) while the other checks still run.
@@ -55,6 +59,7 @@ import {
   evalPayoutFailed,
   evalPayoutStuck,
   evalReconDrift,
+  evalReversedChargeUnrefunded,
   FAILURE_LOOKBACK_MS,
   RECON_WINDOW_DAYS,
   resolvableCheckNames,
@@ -338,6 +343,37 @@ async function checkPayoutReconDrift(fromDate: Date, toDate: Date): Promise<Chec
   });
 }
 
+// g. reversed_charge_unrefunded (READ-ONLY, no Stripe): an APPROVED clawback_reviews row whose
+// advertiser refund was never queued (refund_queued=false) while a succeeded advertiser_charge
+// still exists for its impression — the books-vs-cash gap the reversal↔refund chain must close.
+// Fires past a 1h grace so a normally-chained POST /billing/refund (which flips refund_queued)
+// never trips it; the pure decision + grace live in monitor-logic.mjs. NO money-table writes.
+async function checkReversedChargeUnrefunded(): Promise<CheckResult> {
+  const name = "reversed_charge_unrefunded";
+  const reviewsRes = await svc("GET", "clawback_reviews", {
+    query:
+      "status=eq.approved&refund_queued=eq.false&impression_id=not.is.null" +
+      "&select=id,impression_id,reviewed_at,refund_queued,status&limit=500",
+  });
+  if (!reviewsRes.ok) return errorCheck(name, `clawback_reviews query HTTP ${reviewsRes.status}`);
+  const reviews = (reviewsRes.data as Array<{ impression_id?: string }>) ?? [];
+
+  // Only look up charges for impressions that actually have an unrefunded approved review.
+  let charges: Array<Record<string, unknown>> = [];
+  const impressionIds = [...new Set(reviews.map((r) => r.impression_id).filter(Boolean))];
+  if (impressionIds.length > 0) {
+    const chargesRes = await svc("GET", "advertiser_charges", {
+      query:
+        `impression_id=in.(${impressionIds.join(",")})&status=eq.succeeded` +
+        "&select=id,impression_id,amount_cents,status&limit=500",
+    });
+    if (!chargesRes.ok) return errorCheck(name, `advertiser_charges query HTTP ${chargesRes.status}`);
+    charges = (chargesRes.data as Array<Record<string, unknown>>) ?? [];
+  }
+
+  return evalReversedChargeUnrefunded({ reviews, charges, now: Date.now() });
+}
+
 // ---------------------------------------------------------------------------
 // Email (Resend) — best-effort, never fails the run, never logs secret values.
 // ---------------------------------------------------------------------------
@@ -409,6 +445,7 @@ Deno.serve(async (req) => {
       ["billing_stalled", checkBillingStalled],
       ["billing_recon_drift", () => checkBillingReconDrift(fromDate, toDate)],
       ["payout_recon_drift", () => checkPayoutReconDrift(fromDate, toDate)],
+      ["reversed_charge_unrefunded", checkReversedChargeUnrefunded],
     ];
     const checks: CheckResult[] = [];
     for (const [name, run] of runners) {

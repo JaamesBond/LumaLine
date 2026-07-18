@@ -39,14 +39,19 @@ const ADMIN_USER_ID = 'a0000000-0000-4000-8000-000000000001';
 export const PUB_A_PUBLISHER_ID = 'a1a1a1a1-0000-0000-0000-000000000001';
 
 /** Mint a Supabase Auth–style HS256 JWT (same secret PostgREST trusts locally). */
-function mintJwt(sub) {
+function mintJwt(sub, extra = {}) {
   const enc = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
   const head    = enc({ alg: 'HS256', typ: 'JWT' });
-  const payload = enc({ role: 'authenticated', aud: 'authenticated', sub, iat: 1700000000, exp: 2000000000 });
+  const payload = enc({ role: 'authenticated', aud: 'authenticated', sub, iat: 1700000000, exp: 2000000000, ...extra });
   const sig = createHmac('sha256', JWT_SECRET).update(`${head}.${payload}`).digest('base64url');
   return `${head}.${payload}.${sig}`;
 }
-export const ADMIN_JWT = mintJwt(ADMIN_USER_ID);
+// M8: money-mutating routes/RPCs (/charge, /refund, /payout/batch, admin_open_clawback,
+// approve_clawback, gdpr_delete_publisher) re-gate to app.is_money_admin() = member(app.money_admins)
+// AND jwt aal='aal2'. ADMIN_USER_ID is seeded into BOTH app.admins and app.money_admins (seed.sql),
+// so the canonical test admin carries aal2. is_admin() is aal-agnostic, so read/booking/reject/resolve
+// calls (membership only) still pass. Refusal tests mint their own aal1 personas (e.g. AADMIN_JWT).
+export const ADMIN_JWT = mintJwt(ADMIN_USER_ID, { aal: 'aal2' });
 
 /** Raw psql — synchronous, tuples-only/unaligned (`-tAqc`), trimmed. Throws if psql is
  * unavailable or the query errors; callers doing readiness checks should catch. */

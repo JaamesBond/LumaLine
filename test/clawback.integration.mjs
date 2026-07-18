@@ -73,7 +73,12 @@ function mintDeviceJwt(sub, publisherId) {
   return mintJwt(sub, { publisher_id: publisherId, device_id: randomUUID() });
 }
 
-const ADMIN_JWT     = mintJwt(ADMIN_USER_ID);
+// M8: approve_clawback is re-gated from app.is_admin() to app.is_money_admin() (aal2 + the
+// app.money_admins tier — 20260716120000_harden_money_rpc_gates.sql). seed.sql seeds ADMIN_USER_ID
+// into BOTH app.admins and app.money_admins, so this bearer must carry aal='aal2' to pass the money
+// gate (a plain aal1 admin JWT would now RAISE 28000 on approve_clawback). reject_clawback stays on
+// is_admin() and an aal2 admin still satisfies it, so this single bearer covers the whole suite.
+const ADMIN_JWT     = mintJwt(ADMIN_USER_ID, { aal: 'aal2' });
 const NON_ADMIN_JWT = mintJwt(NON_ADMIN_USER_ID);
 const PUB_A_JWT     = mintDeviceJwt(PUB_A_AUTH_ID, PUB_A_PUBLISHER_ID);
 const PUB_B_JWT     = mintDeviceJwt(PUB_B_AUTH_ID, NON_ADMIN_USER_ID);  // pub B sub = non-admin

@@ -104,6 +104,18 @@ async function requireAdmin(req: Request): Promise<string | null> {
   return status === 200 && text.trim() === "true" ? auth : null;
 }
 
+// Money-admin gate — the aal2 + app.money_admins tier (money_admin_check() wraps
+// app.is_money_admin()). Re-gates the money-mutating POST /payout/batch BEARER path so a stolen
+// aal1 magic-link session (which still passes requireAdmin) cannot trigger real EUR transfers to
+// publisher bank accounts. The pg_cron auto-payout path is UNAFFECTED — it authenticates with the
+// cron secret (hasValidCronSecret) and never presents an admin bearer.
+async function requireMoneyAdmin(req: Request): Promise<string | null> {
+  const auth = bearerHeader(req);
+  if (!auth) return null;
+  const { status, text } = await forwardRpc("money_admin_check", {}, auth);
+  return status === 200 && text.trim() === "true" ? auth : null;
+}
+
 // pg_cron auth — the weekly auto-payout job authenticates with a shared secret (Vault-stored,
 // see app.run_payout) instead of an admin JWT. Constant-time compare; empty never authorizes.
 function hasValidCronSecret(req: Request): boolean {
@@ -310,6 +322,12 @@ Deno.serve(async (req) => {
 
   // ---- POST /payout/batch[?dry_run=true] (admin) --------------------------------------
   if (req.method === "POST" && path.endsWith("/payout/batch")) {
+    // A real reserve→transfer→confirm moves EUR to publisher bank accounts. When invoked by an
+    // admin BEARER (not the cron secret), require the aal2 money tier — the top-level requireAdmin
+    // only proves membership and is satisfiable by an aal1 magic-link session. The cron path
+    // (auto-payout, weekly) is exempt: it presents no bearer, so `cron` is true and it is untouched.
+    if (!cron && !(await requireMoneyAdmin(req))) return jsonErr("Forbidden", 403);
+
     const dryRun = url.searchParams.get("dry_run") === "true";
 
     // Phase 1: reserve pending payouts (no ledger). Idempotent via the one-active index.

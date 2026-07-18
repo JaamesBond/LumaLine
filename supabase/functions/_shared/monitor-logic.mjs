@@ -24,6 +24,7 @@ export const CHECK_NAMES = [
   'billing_stalled',
   'billing_recon_drift',
   'payout_recon_drift',
+  'reversed_charge_unrefunded',
 ];
 
 // Payouts: terminal = paid/failed/canceled (payout_status_kind enum). A payout sitting
@@ -36,6 +37,14 @@ export const RECON_WINDOW_DAYS = 35;
 
 // Visibility window for failed payouts / failed charges.
 export const FAILURE_LOOKBACK_MS = 24 * 60 * 60 * 1000; // 24h
+
+// reversed_charge_unrefunded grace (Phase-2 backstop for the reversal↔refund coupling):
+// an approved clawback whose advertiser refund is chained in the same UI flow should be
+// queued within minutes. Past this grace, an approved review that still has a succeeded,
+// un-refunded charge is a books-vs-cash divergence heading for permanent billing recon
+// drift — so it fires. The hourly monitor cron means a normally-chained refund (which
+// flips refund_queued=true) never lingers long enough to trip this.
+export const REVERSED_CHARGE_UNREFUNDED_GRACE_MS = 60 * 60 * 1000; // 1h
 
 /**
  * Coerce a micros value (PostgREST may serialize bigint sums as number or string).
@@ -322,6 +331,79 @@ export function evalBillingStalled(input) {
   }));
   if (alerts.length === 0) return pass(name, 'no advertiser is paused with uncharged cleared debt');
   return fail(name, `${alerts.length} advertiser(s) paused with uncharged cleared debt`, alerts);
+}
+
+/**
+ * CHECK. reversed_charge_unrefunded (HIGH, stateful) — Phase-2 durable backstop for the
+ * reversal↔refund coupling. A manual/approved clawback (admin_open_clawback / approve_clawback)
+ * reverses the advertiser_billing ledger leg synchronously, but the Stripe cash refund is a
+ * SEPARATE POST /billing/refund step chained in the dashboard UI. If that step is skipped or
+ * fails, the books say 'reversed' while the advertiser keeps the cash — and billing_recon_drift
+ * eventually goes permanently red. This check fires FIRST, before the drift is baked in: any
+ * APPROVED clawback_reviews row that (a) still has refund_queued=false and (b) has a matching
+ * succeeded advertiser_charge for its impression, older than the grace, alerts per review id.
+ *
+ * NO FALSE POSITIVE by construction: a refunded review (refund_queued=true), a non-approved
+ * review (pending/rejected), a review with no impression_id (NULL-impression / CPC — the refund
+ * path can't act on it anyway), or a review whose impression carries no succeeded charge (e.g. a
+ * sub-50c leg never charged) never fires. Keys on CURRENT state, so the alert auto-resolves the
+ * moment the refund is queued — never a false 'resolved' from mere passage of time.
+ *
+ * The edge fn does the I/O: it pre-fetches approved+refund_queued=false reviews (impression_id
+ * NOT NULL) and the succeeded charges for those impressions; this function joins + ages them.
+ * @param {{reviews?: Array<{id?: string, impression_id?: string, reviewed_at?: string, refund_queued?: boolean, status?: string}>,
+ *          charges?: Array<{id?: string, impression_id?: string, amount_cents?: number, status?: string}>,
+ *          now?: number, graceMs?: number}} input
+ */
+export function evalReversedChargeUnrefunded(input) {
+  const name = 'reversed_charge_unrefunded';
+  const reviews = Array.isArray(input?.reviews) ? input.reviews : [];
+  const charges = Array.isArray(input?.charges) ? input.charges : [];
+  const now = Number.isFinite(input?.now) ? input.now : Date.now();
+  const graceMs = Number.isFinite(input?.graceMs) ? input.graceMs : REVERSED_CHARGE_UNREFUNDED_GRACE_MS;
+
+  // Index succeeded charges by impression_id (first wins; one succeeded charge per impression).
+  const succeededByImpression = new Map();
+  for (const c of charges) {
+    if (String(c?.status) !== 'succeeded') continue; // defensive: edge pre-filters to succeeded
+    const imp = c?.impression_id;
+    if (!imp || succeededByImpression.has(imp)) continue;
+    succeededByImpression.set(imp, c);
+  }
+
+  const alerts = [];
+  for (const r of reviews) {
+    // Only APPROVED + not-yet-refunded reviews are candidates. A refunded (refund_queued=true)
+    // or non-approved review is books-vs-cash consistent → must never fire.
+    if (String(r?.status) !== 'approved') continue;
+    if (r?.refund_queued === true) continue;
+    const imp = r?.impression_id;
+    if (!imp) continue; // NULL-impression review (CPC) has no refundable charge — do not fire
+    const charge = succeededByImpression.get(imp);
+    if (!charge) continue; // reversed leg maps to no succeeded cash → nothing to refund
+    const reviewedMs = Date.parse(String(r?.reviewed_at ?? ''));
+    // Unparseable reviewed_at → treat as past grace (fail loud, never silently green).
+    const ageMs = Number.isFinite(reviewedMs) ? now - reviewedMs : Infinity;
+    if (ageMs > graceMs) {
+      alerts.push({
+        check_name: name,
+        severity: 'high',
+        dedup_key: `review:${r?.id ?? 'unknown'}`,
+        payload: {
+          review_id: r?.id ?? null,
+          impression_id: imp,
+          charge_id: charge?.id ?? null,
+          amount_cents: charge?.amount_cents ?? null,
+          reviewed_at: r?.reviewed_at ?? null,
+          age_ms: Number.isFinite(ageMs) ? ageMs : null,
+        },
+      });
+    }
+  }
+  if (alerts.length === 0) {
+    return pass(name, 'no approved clawback review with an unrefunded succeeded charge past grace');
+  }
+  return fail(name, `${alerts.length} approved review(s) with a succeeded charge unrefunded > ${graceMs}ms`, alerts);
 }
 
 /**

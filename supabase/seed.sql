@@ -103,3 +103,13 @@ on conflict (id) do nothing;
 insert into app.admins (auth_user_id) values
   ('a0000000-0000-4000-8000-000000000001')
 on conflict (auth_user_id) do nothing;
+
+-- M8: the dev admin is ALSO the money-admin tier so integration suites can exercise the aal2
+-- money gates (approve_clawback / gdpr_delete_publisher / admin_open_clawback / POST /billing/charge
+-- / POST /stripe-connect/payout/batch). Membership alone is NOT enough — app.is_money_admin() also
+-- requires the session's jwt aal='aal2', so a test must mint its bearer with { aal: 'aal2' } to pass;
+-- a plain aal1 admin JWT still fails every money gate. In production BOTH lists are seeded
+-- out-of-band (service_role/SQL only), never from a client.
+insert into app.money_admins (auth_user_id) values
+  ('a0000000-0000-4000-8000-000000000001')
+on conflict (auth_user_id) do nothing;
