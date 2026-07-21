@@ -82,6 +82,11 @@ export const CLAUDE_SETTINGS = env.CLAUDE_CONFIG_DIR
   : path.join(home, '.claude', 'settings.json');
 
 export const CACHE_TTL_MS = 30_000;
+// Anonymous (logged-out) self-promo line cache. The line is STATIC, so a logged-out client fetches
+// the signed /line once per this TTL and renders from cache in between — no per-tick network, no
+// window. Default 6h → a handful of fetches/day for a logged-out user (vs the per-second heartbeat
+// window storm the sentinel used to generate). Env-tunable for dev.
+export const SENTINEL_TTL_MS = Number(env.LUMALINE_SENTINEL_TTL_MS || 6 * 60 * 60 * 1000);
 // Remote edge cold-start + Ed25519 signing measured ~1.6s on a cold tick; 800ms (the old
 // localhost-tuned value) would abort the first tick after idle and show nothing even when
 // wired right. 3s gives margin; still env-tunable for fast localhost dev.

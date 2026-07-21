@@ -33,6 +33,13 @@ export function startServer({ port = 0, privateKeyPem, clickSecret, store, ad, l
         const data = JSON.stringify({ adId: theAd.adId, line: theAd.line, label, dest: theAd.dest, durationMs: theAd.durationMs, issuedAt: Date.now() });
         return json(res, 200, { data, sig: signData(data, privateKeyPem) });
       }
+      if (url.pathname === '/line') {
+        // Display-only SIGNED self-promo, NO window (the anonymous/logged-out path). Static
+        // content, no click token, no DB window — mirrors the edge fn's /line. Method-agnostic so
+        // the client's POST reaches it. adData carries NO windowId (there is no window).
+        const adData = JSON.stringify({ line: theAd.line, label, clickUrl: theAd.dest });
+        return json(res, 200, { adData, sig: signData(adData, privateKeyPem) });
+      }
       if (req.method === 'POST' && url.pathname === '/window/open') {
         const win = store.open(await readBody(req));
         const token = clicks.mint({ windowId: win.windowId, adId: theAd.adId, dest: theAd.dest });
