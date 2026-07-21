@@ -41,6 +41,10 @@ before(async () => {
       if (req.url.endsWith('/window/open')) {
         const adData = JSON.stringify({ windowId: 'w1', line: 'Matei is the best', label: 'sponsored', clickUrl: 'https://example.com/x' });
         res.end(JSON.stringify({ windowId: 'w1', challenge: 'ch', dwellMs: 5000, hbIntervalMs: 1000, adData, sig: signData(adData, priv) }));
+      } else if (req.url.endsWith('/line')) {
+        // Display-only signed self-promo (no windowId) — the anonymous path.
+        const adData = JSON.stringify({ line: 'Matei is the best', label: 'sponsored', clickUrl: 'https://example.com/x' });
+        res.end(JSON.stringify({ adData, sig: signData(adData, priv) }));
       } else { res.end(JSON.stringify({ ok: true })); }
     });
   });
@@ -81,10 +85,15 @@ test('logged-in: statusline attaches the device token as a Bearer header on /win
   assert.equal(open.auth, `Bearer ${TOKEN}`, 'the device token rides as Authorization: Bearer');
 });
 
-test('logged-out: statusline sends NO Authorization header (anonymous sentinel path)', async () => {
+test('logged-out: statusline shows the signed self-promo via /line, NEVER opens a window', async () => {
   captured = [];
   const { out } = await tick();
-  assert.match(out, /Matei is the best/);
-  const open = captured.find((c) => c.path.endsWith('/window/open'));
-  assert.equal(open.auth, null, 'no auth header when there is no stored credential');
+  assert.match(out, /Matei is the best/, 'renders the signed self-promo line');
+  const line = captured.find((c) => c.path.endsWith('/line'));
+  assert.ok(line, '/line (display-only) was called');
+  assert.equal(line.auth, null, 'no auth header when there is no stored credential');
+  // The whole point of the fix: a logged-out client must NOT run the window protocol (no
+  // open/beat/close), because the sentinel is gross=0 and can never earn — that was the storm.
+  assert.ok(!captured.some((c) => c.path.endsWith('/window/open')), 'logged-out never opens a window');
+  assert.ok(!captured.some((c) => c.path.endsWith('/window/beat')), 'logged-out never beats');
 });

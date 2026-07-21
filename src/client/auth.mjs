@@ -160,8 +160,22 @@ export async function getValidAccessToken({
     if (curLeft > skewMs) return cur.access_token;      // someone already refreshed — use the new token
     if (!cur.refresh_token) return curLeft > 0 ? cur.access_token : null;
 
-    const { ok, data } = await postJson(fetchImpl, `${authBase}/device/refresh`, { refresh_token: cur.refresh_token }, { timeoutMs });
-    if (!ok || !data?.access_token) return curLeft > 0 ? cur.access_token : null; // rejected; use current if still valid
+    const { ok, status, data } = await postJson(fetchImpl, `${authBase}/device/refresh`, { refresh_token: cur.refresh_token }, { timeoutMs });
+    if (!ok || !data?.access_token) {
+      // A DEFINITIVE invalid_grant (HTTP 400) means the stored refresh token is permanently
+      // desynced — the rotation race was lost, or the process crashed after the server rotated the
+      // stored hash but before we persisted the new token, and we are now BEYOND the server's
+      // prev-token grace window (device_refresh grace, migration 20260704120000). Keeping the dead
+      // token makes the client re-POST /device/refresh on EVERY tick forever, each a fresh 400 — the
+      // self-inflicted edge-invocation storm observed in prod. Clear it so we stop hammering and
+      // fall cleanly to the anonymous sentinel until the user re-logs in. TRANSIENT failures (5xx, or
+      // a network throw handled by the outer catch) keep the token for a later retry, and a
+      // still-valid access token is returned either way so a blip never breaks a live session.
+      if (status === 400 && data?.error === 'invalid_grant') {
+        saveToken(file, { ...cur, refresh_token: null });
+      }
+      return curLeft > 0 ? cur.access_token : null;
+    }
     const next = shapeToken(data, now, cur);
     saveToken(file, next);
     return next.access_token;

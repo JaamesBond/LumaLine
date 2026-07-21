@@ -14,10 +14,11 @@
 //     cost/token values stay local.
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, renameSync } from 'node:fs';
 import {
-  LUMALINE_HOME, PUB, KEYS_DIR, statePath, AUDIT, FEED_BASE,
-  FETCH_TIMEOUT_MS, COOLDOWN_MS, HYPERLINKS, SHOW_URL, COLOR, COLOR_RESET,
+  LUMALINE_HOME, PUB, KEYS_DIR, statePath, AUDIT, FEED_BASE, AD_CACHE,
+  FETCH_TIMEOUT_MS, COOLDOWN_MS, SENTINEL_TTL_MS, HYPERLINKS, SHOW_URL, COLOR, COLOR_RESET,
 } from './config.mjs';
 import { step } from './client/window.mjs';
+import { sentinelStep } from './client/sentinel.mjs';
 import { getValidAccessToken } from './client/auth.mjs';
 import { sessionKey } from './client/session.mjs';
 import { loadKeyring } from './lib/keyring.mjs';
@@ -100,14 +101,32 @@ async function main() {
   // path degrades to anonymous on any error), and only hits the network near token expiry.
   try { authToken = await getValidAccessToken({ now }); } catch { authToken = null; }
   let r;
-  try {
-    r = await step({ state, now, activity, post, cfg: { cooldownMs: COOLDOWN_MS, verifyAd, showUrl: SHOW_URL, sessionId: key, clock: Date.now } });
-  } catch (e) {
-    audit({ event: 'step_error', message: e && e.message });
-    return base;   // backend unreachable / error -> graceful base status, nothing billed
+  let isAnon = false;
+  if (authToken) {
+    // Logged-in publisher → the full server-verified window protocol. This is the ONLY path that
+    // earns, so it is the only path that opens windows + sends heartbeats.
+    try {
+      r = await step({ state, now, activity, post, cfg: { cooldownMs: COOLDOWN_MS, verifyAd, showUrl: SHOW_URL, sessionId: key, clock: Date.now } });
+    } catch (e) {
+      audit({ event: 'step_error', message: e && e.message });
+      return base;   // backend unreachable / error -> graceful base status, nothing billed
+    }
+  } else {
+    // Logged-out → display the signed self-promo WITHOUT a window. The sentinel is gross=0 and can
+    // never earn, so opening per-second heartbeat windows for it was pure waste (the prod storm).
+    // The signed /line is fetched at most once per SENTINEL_TTL_MS and cached; no per-tick network.
+    isAnon = true;
+    const cache = loadJson(AD_CACHE, null);
+    try {
+      r = await sentinelStep({ now, fetchLine: () => post('/line', {}), verifyAd, cache, ttlMs: SENTINEL_TTL_MS, showUrl: SHOW_URL });
+    } catch (e) {
+      audit({ event: 'sentinel_error', message: e && e.message });
+      return base;
+    }
   }
   if (r.verifyFail) { audit({ event: 'verify_fail' }); saveJson(stateFile, null); return base; }
-  saveJson(stateFile, r.state);
+  if (isAnon) saveJson(AD_CACHE, r.cache ?? null);
+  else saveJson(stateFile, r.state);
   if (!r.status) return base;
   // r.status already carries the inline URL + "sponsored" disclosure (built in client/window.mjs,
   // gated by SHOW_URL). OSC-8 makes the WHOLE line clickable where Claude Code forwards it (IDE

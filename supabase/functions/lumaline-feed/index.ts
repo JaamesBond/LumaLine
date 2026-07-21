@@ -153,6 +153,29 @@ Deno.serve(async (req) => {
   let body: Record<string, unknown> = {};
   try { body = await req.json(); } catch { /* empty body ok */ }
 
+  // ---- line: display-only SIGNED self-promo, NO window (the anonymous / logged-out path) ----
+  // A logged-out client shows THIS static, Ed25519-signed line instead of opening a server window.
+  // The sentinel is gross=0 and can never earn, so running the per-second heartbeat window protocol
+  // for it is pure waste — in prod that churned ~44k windows + a matching invocation storm off ONE
+  // logged-out machine. This endpoint has NO DB write, NO click token, NO auth (skips chooseAuth,
+  // so no sentinel-JWT mint), and is safe for the client to cache for hours. It is signed with the
+  // SAME key + keyid as /window/open, so the client's signed-content-only rule is fully preserved.
+  if (path.endsWith("/line")) {
+    try { await signKey(); }
+    catch (e) { return json({ error: "feed misconfigured", detail: (e as Error).message }, 500); }
+    const line  = Deno.env.get("LUMALINE_SELFPROMO_LINE")  ?? "LumaLine — honest, signed ads for Claude Code";
+    const label = Deno.env.get("LUMALINE_SELFPROMO_LABEL") ?? "sponsored";
+    const dest  = Deno.env.get("LUMALINE_SELFPROMO_DEST")  ?? "https://lumaline.dev";
+    // Display-only: adData carries NO windowId (there is no window). The client's anonymous path
+    // parses {line,label,clickUrl}, verifies the sig, and renders — it never runs the state machine.
+    const adData = JSON.stringify({ line, label, clickUrl: dest });
+    let sig: string;
+    try { sig = await signAd(adData); }
+    catch (e) { return json({ error: "feed misconfigured", detail: (e as Error).message }, 500); }
+    const keyid = Deno.env.get("LUMALINE_ED25519_KEY_ID")?.trim().toLowerCase() || undefined;
+    return json({ adData, sig, keyid });
+  }
+
   let auth: string;
   let isReal: boolean;
   try { ({ auth, isReal } = await chooseAuth(req)); }

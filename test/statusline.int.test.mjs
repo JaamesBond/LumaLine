@@ -45,17 +45,21 @@ function tick(tokens, sessionId) {
   });
 }
 
-test('shows the sponsored line on first tick and writes an audit log', async () => {
+test('logged-out: shows the signed self-promo via /line (no window) and audits it', async () => {
   const out = await tick(100);
   assert.match(out, /Matei is the best/);
   const auditFilePath = path.join(home, 'audit.log');
   assert.ok(existsSync(auditFilePath));
-  assert.match(readFileSync(auditFilePath, 'utf8'), /window\/open/);
+  const auditLog = readFileSync(auditFilePath, 'utf8');
+  assert.match(auditLog, /\/line/, 'the anonymous path fetches the display-only /line');
+  assert.doesNotMatch(auditLog, /window\/open/, 'and NEVER opens a window (the storm fix)');
 });
 
-test('two sessions get independent state files (no collision)', async () => {
+test('logged-out: sessions share ONE sentinel cache, and NO per-session window state is created', async () => {
   await tick(100, 'sess-A');
   await tick(100, 'sess-B');
-  assert.ok(existsSync(path.join(home, 'impression-state-sess-A.json')), 'session A state file');
-  assert.ok(existsSync(path.join(home, 'impression-state-sess-B.json')), 'session B state file');
+  // The anonymous line is static + cached in a single ad-cache.json — not a per-session window.
+  assert.ok(existsSync(path.join(home, 'ad-cache.json')), 'one shared sentinel cache');
+  assert.ok(!existsSync(path.join(home, 'impression-state-sess-A.json')), 'no per-session window state for anonymous');
+  assert.ok(!existsSync(path.join(home, 'impression-state-sess-B.json')), 'no per-session window state for anonymous');
 });
