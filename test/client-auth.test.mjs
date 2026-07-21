@@ -116,6 +116,44 @@ test('getValidAccessToken: null (anonymous) only once the token is EXPIRED and r
   assert.equal(tok, null, 'expired token + dead refresh → anonymous (never throws)');
 });
 
+test('getValidAccessToken: a DEFINITIVE invalid_grant clears the desynced refresh token (stops the 400 storm)', async () => {
+  const f = tmp();
+  const nowS = 1_700_000_000;
+  const obj = tokenObj(nowS + 60);          // inside skew but STILL valid → attempts a refresh
+  saveToken(f, obj);
+  let calls = 0;
+  const fetchImpl = async () => { calls += 1; return { ok: false, status: 400, json: async () => ({ error: 'invalid_grant' }) }; };
+
+  // Tick 1: refresh 400s (invalid_grant). Returns the still-valid access token, but clears the dead
+  // refresh token so the client will not re-hit /device/refresh forever.
+  const t1 = await getValidAccessToken({ file: f, now: nowS * 1000, skewMs: 300_000, authBase: 'https://x/auth-device', fetchImpl });
+  assert.equal(t1, obj.access_token, 'the still-valid access token is returned this tick');
+  assert.equal(loadToken(f).refresh_token, null, 'the desynced refresh token is cleared');
+  assert.equal(calls, 1);
+
+  // Tick 2: no refresh token → NO network call. The per-tick 400 storm is over.
+  const t2 = await getValidAccessToken({ file: f, now: nowS * 1000, skewMs: 300_000, authBase: 'https://x/auth-device', fetchImpl });
+  assert.equal(calls, 1, 'no further /device/refresh calls — the storm is stopped');
+  assert.equal(t2, obj.access_token, 'the valid access token is still used until it actually expires');
+});
+
+test('getValidAccessToken: a TRANSIENT refresh failure (5xx) KEEPS the refresh token for a later retry', async () => {
+  const f = tmp();
+  const nowS = 1_700_000_000;
+  const obj = tokenObj(nowS + 60);
+  saveToken(f, obj);
+  let calls = 0;
+  const fetchImpl = async () => { calls += 1; return { ok: false, status: 503, json: async () => ({ error: 'unavailable' }) }; };
+
+  const t1 = await getValidAccessToken({ file: f, now: nowS * 1000, skewMs: 300_000, authBase: 'https://x/auth-device', fetchImpl });
+  assert.equal(t1, obj.access_token);
+  assert.equal(loadToken(f).refresh_token, 'refresh-abc', 'a transient 5xx must NOT clear the refresh token');
+
+  // Next tick still retries (a transient outage should self-heal once the server recovers).
+  await getValidAccessToken({ file: f, now: nowS * 1000, skewMs: 300_000, authBase: 'https://x/auth-device', fetchImpl });
+  assert.equal(calls, 2, 'a transient failure leaves the client retrying on the next tick');
+});
+
 test('getValidAccessToken: concurrent ticks redeem the single-use refresh token exactly ONCE (lock)', async () => {
   const f = tmp();
   const nowS = 1_700_000_000;
