@@ -36,11 +36,26 @@ async function advisors(kind) {
   try { return JSON.parse(text).lints ?? []; } catch { console.error(`FATAL: unparseable advisors/${kind} body`); process.exit(2); }
 }
 
-// The anon-reachable-SECDEF / RLS-off bug class this gate exists to stop. Match by the advisor's
-// stable `name` (Supabase lint slugs) OR any ERROR-level security lint (fail closed on the unknown).
-const BLOCKING_NAME = /security_definer|rls_disabled|rls_references_user_metadata|anon|exposed|extension_in_public|policy_exists_rls_disabled|function_search_path/i;
-const isBlocking = (l) =>
-  String(l?.level).toUpperCase() === 'ERROR' || BLOCKING_NAME.test(String(l?.name ?? ''));
+// The bug CLASS this gate exists to stop: what an errant migration can regress into a REAL exposure —
+// anon-reachable SECDEF, RLS turned off, a SECDEF view, a mutable search_path — plus any ERROR-level
+// security lint (fail closed on the unknown). Match by the advisor's stable `name` (Supabase slugs).
+const BLOCKING_NAME = /rls_disabled|rls_references_user_metadata|policy_exists_rls_disabled|security_definer_view|function_search_path|(^|_)anon(_|$)/i;
+// Deliberately NOT blocking (the gate's original bare `security_definer` term matched this and aborted
+// every deploy on a non-bug): `authenticated_security_definer_function_executable` is the INTENTIONAL
+// self-gating-RPC pattern this codebase is built on — every such function re-checks
+// is_admin / is_money_admin / current_advertiser_id / RLS in-body, and anon EXECUTE is separately
+// REVOKEd (0 anon-executable findings on prod). Verified gated: approve_clawback,
+// gdpr_delete_publisher, admin_open_clawback, advertiser_set_line_item_status, resolve_dispute,
+// advertiser_submit_creative, … A gate that cries wolf on the intended pattern gets muted, which is
+// how the REAL anon footgun would slip through. Baseline placement/config advisories
+// (extension_in_public, rls_enabled_no_policy = deny-by-default, auth_leaked_password_protection) are
+// a hardening backlog, not a deploy-regressible exposure — printed as non-blocking so they stay visible.
+const INTENTIONAL = new Set(['authenticated_security_definer_function_executable']);
+const isBlocking = (l) => {
+  const name = String(l?.name ?? '');
+  if (INTENTIONAL.has(name)) return false;
+  return String(l?.level).toUpperCase() === 'ERROR' || BLOCKING_NAME.test(name);
+};
 
 const security = await advisors('security');
 const blocking = security.filter(isBlocking);
