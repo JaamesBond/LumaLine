@@ -16,12 +16,18 @@ export const TEST_FALLBACK_PM = "pm_card_visa";
 
 /**
  * Convert micro-EUR to Stripe cents. 1 EUR = 1,000,000 micro-EUR = 100 cents.
- * Rounded (banker-agnostic Math.round) — the same conversion the charge + reconcile use.
+ * FLOORED (Math.floor), never rounded up (F4). The amount charged/refunded must never exceed the
+ * micros actually cleared: flooring the batch SUM keeps Stripe ≤ cleared (no phantom overcharge),
+ * and flooring each group's amount_cents guarantees Σ⌊gᵢ⌋ ≤ ⌊Σgᵢ⌋, so a per-impression clawback can
+ * never cumulatively over-refund the aggregate PaymentIntent. The sub-cent remainder (<1c/batch) is
+ * left uncollected (honest under-bill); recon drift becomes bounded and one-directional (db ≥ stripe).
+ * NOTE: payout (stripe-connect) and prepay (advertiser-logic) keep their OWN copies of this helper;
+ * their inputs are already whole-cent multiples, so this change does not touch them.
  * @param {number} micros
  * @returns {number} cents
  */
 export function microsToCents(micros) {
-  return Math.round(Number(micros) / 10000);
+  return Math.floor(Number(micros) / 10000);
 }
 
 /**
@@ -38,6 +44,34 @@ export function microsToCents(micros) {
  */
 export function batchIdempotencyKey(batchId) {
   return `lumaline_agg_${String(batchId)}`;
+}
+
+/**
+ * Which Stripe PaymentIntent statuses represent money that has moved (or is moving) for a batch and
+ * must therefore be ADOPTED rather than re-created (A1 double-charge fix). A prior attempt that ended
+ * canceled/requires_payment_method left no live charge, so it is NOT adopted (a fresh create — still
+ * guarded by the immutable per-batch idempotency key — is correct there). off_session card confirms
+ * synchronously so 'processing'/'requires_capture' are defensive, but harmless to include.
+ * @param {unknown} status a Stripe PaymentIntent.status
+ * @returns {boolean}
+ */
+export function shouldAdoptPi(status) {
+  return status === "succeeded" || status === "processing" || status === "requires_capture";
+}
+
+/**
+ * Settle route for a batch during RECOVERY (A11). The route is FROZEN on the batch rows at reserve
+ * (settle_mode). Recovery must honor the frozen route, never the advertiser's CURRENT billing_mode —
+ * a mode flip between reserve and recovery must not re-route a half-settled batch (which could draw
+ * prepay balance AND charge a Stripe PI for the same groups = double-collect). Legacy rows (settle_mode
+ * NULL, reserved before the column existed) fall back to the advertiser's current billing_mode.
+ * @param {unknown} frozenSettleMode  advertiser_charges.settle_mode ('postpay' | 'prepay' | null)
+ * @param {unknown} currentBillingMode advertisers.billing_mode (fallback for legacy rows)
+ * @returns {'postpay'|'prepay'}
+ */
+export function chooseSettleRoute(frozenSettleMode, currentBillingMode) {
+  if (frozenSettleMode === "postpay" || frozenSettleMode === "prepay") return frozenSettleMode;
+  return currentBillingMode === "prepay" ? "prepay" : "postpay";
 }
 
 /**

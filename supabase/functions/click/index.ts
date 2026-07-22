@@ -15,6 +15,7 @@
 //     but still returns the destination so a re-click still lands the user (no double-bill).
 import { corsHeaders } from "../_shared/cors.ts";
 import { serviceRpc } from "../_shared/jwt.ts";
+import { resolveClientIp, saltedIpHash } from "../_shared/client-ip.mjs";
 
 function extractToken(url: URL): string | null {
   const q = url.searchParams.get("token");
@@ -38,7 +39,16 @@ Deno.serve(async (req) => {
   const token = extractToken(new URL(req.url));
   if (!token) return new Response("missing token", { status: 400, headers: corsHeaders });
 
-  const { ok, data } = await serviceRpc("click_resolve", { p_token: token });
+  // Self-click binding: derive the CLICKER's salted IP hash from the SAME trusted-IP source + SAME
+  // salt (LUMALINE_RL_SALT) that stamped the serving window's ad_windows.ip_hash in
+  // lumaline-feed/window_open (shared _shared/client-ip.mjs → byte-identical output). click_resolve
+  // records the click VOID (never bills) when the clicker's hash equals the serving window's — the
+  // honest single-user terminal case IS same-machine, so same-IP clicks are owner self-views, not
+  // billable CPC. Null when no salt / no IP => gate inert, never a false self-click void.
+  const { ip: clickerIp } = await resolveClientIp(req.headers, Deno.env.get("LUMALINE_EDGE_PROOF") ?? "");
+  const clickerIpHash = await saltedIpHash(Deno.env.get("LUMALINE_RL_SALT") ?? "", clickerIp);
+  const { ok, data } = await serviceRpc("click_resolve",
+    { p_token: token, p_clicker_ip_hash: clickerIpHash });
   if (!ok) return new Response("click resolve failed", { status: 502, headers: corsHeaders });
 
   const result = (data ?? {}) as { ok?: boolean; dest?: unknown; reason?: string };

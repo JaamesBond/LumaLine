@@ -110,6 +110,49 @@ export function isAdvertiserDisputeEvent(type) {
 }
 
 /**
+ * True when a Stripe event type is a deposit REFUND. A refund carries a CUMULATIVE amount_refunded
+ * and is partial-capable, so it books DELTAs (mirrors payout_reverse) — distinct from a dispute,
+ * whose object carries the disputed amount directly. Subset of isAdvertiserDisputeEvent's umbrella.
+ */
+export function isAdvertiserRefundEvent(type) {
+  return type === "charge.refunded";
+}
+
+/**
+ * Cumulative reversal TARGET in EUR-micros for a deposit-reversal event.
+ *   - charge.refunded : obj.amount_refunded (CUMULATIVE refunded on the charge, in Stripe cents).
+ *                       NEVER obj.amount (the full original charge) — that reverses the whole
+ *                       deposit on a partial refund (the A4 bug).
+ *   - charge.dispute.*: obj.amount (the disputed amount, in cents).
+ * Returns micros (>= 0). Callers pass this to the RPC as the cumulative target; the RPC books the
+ * delta over what this deposit (PI) has already reversed.
+ * @param {string} eventType
+ * @param {{amount?:number, amount_refunded?:number}} obj  Stripe event.data.object
+ * @returns {number}
+ */
+export function reversalTargetMicros(eventType, obj) {
+  const o = obj ?? {};
+  if (eventType === "charge.refunded") {
+    return centsToMicros(Number(o.amount_refunded ?? 0));
+  }
+  return centsToMicros(Number(o.amount ?? 0));
+}
+
+/**
+ * DELTA to book this call = the increase of the cumulative reversal target over what has already
+ * been reversed for this deposit (PI). Clamped to >= 0 (mirrors payout_reverse's `v_delta`): a
+ * replay (target == already) or an out-of-order lower cumulative yields 0, so the RPC no-ops.
+ * @param {number} cumulativeTargetMicros
+ * @param {number} alreadyReversedMicros
+ * @returns {number}
+ */
+export function reversalDeltaMicros(cumulativeTargetMicros, alreadyReversedMicros) {
+  const target  = Number(cumulativeTargetMicros) || 0;
+  const already = Number(alreadyReversedMicros)  || 0;
+  return Math.max(0, target - already);
+}
+
+/**
  * Refund branch selector (mirrors billing /refund + admin_prepay_clawback): a card-settled charge
  * refunds via Stripe; a balance-settled (prepay draw-down) charge re-credits the prepay balance —
  * NEVER both, so a prepay charge is never double-refunded.

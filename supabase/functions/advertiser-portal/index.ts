@@ -43,18 +43,23 @@ import { parseWebhookSecrets } from "../_shared/webhook-secrets.mjs";
 import {
   evaluateDepositEvent,
   isAdvertiserDisputeEvent,
+  isAdvertiserRefundEvent,
+  reversalTargetMicros,
   piIdOf,
-  centsToMicros,
 } from "../_shared/advertiser-logic.mjs";
+import { errorResponseBody, errorDetailEnabled } from "../_shared/http-errors.mjs";
 
 const cors = { ...corsHeaders, "Access-Control-Allow-Methods": "POST, OPTIONS" } as const;
 
 function jsonOk(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, "content-type": "application/json" } });
 }
+const DEBUG_ERRORS = errorDetailEnabled(Deno.env);
 function jsonErr(message: string, status: number, detail?: unknown): Response {
-  const body: Record<string, unknown> = { error: message };
-  if (detail !== undefined && detail !== null) body.detail = detail;
+  if (detail !== undefined && detail !== null) {
+    try { console.error(`jsonErr ${status}: ${message}`, detail); } catch { /* ignore */ }
+  }
+  const body = errorResponseBody(message, detail, DEBUG_ERRORS);
   return new Response(JSON.stringify(body), { status, headers: { ...cors, "content-type": "application/json" } });
 }
 
@@ -142,7 +147,7 @@ Deno.serve(async (req) => {
     // NO dedup row so Stripe's retry is not turned into a permanent no-op). The DB primitives are
     // independently idempotent (UNIQUE pi_id / dispute_id), so a replay before the record is harmless.
     const seen = await svc("GET", "stripe_webhook_events", {
-      query: `event_id=eq.${encodeURIComponent(event.id)}&select=event_id&limit=1`,
+      query: `event_id=eq.${encodeURIComponent(event.id)}&fn=eq.advertiser-portal&select=event_id&limit=1`,
     });
     if (seen.ok && Array.isArray(seen.data) && (seen.data as unknown[]).length > 0) {
       return jsonOk({ ok: true, duplicate: true, type: event.type });
@@ -196,11 +201,29 @@ Deno.serve(async (req) => {
             | { advertiser_id?: string; amount_micros?: number } | null;
           if (!dep?.advertiser_id) {
             handled = { type: event.type, reversed: false, reason: "no_matching_deposit" };
+          } else if (isAdvertiserRefundEvent(event.type)) {
+            // REFUND (partial-capable): obj is a Charge; obj.amount_refunded is the CUMULATIVE
+            // refunded amount. Book only the DELTA over what this PI has already reversed (mirrors
+            // payout_reverse). Using obj.amount (the full charge) reverses the whole deposit on a
+            // partial refund. Per-PI cumulative dedup lives in the RPC: a replay -> delta 0 -> no-op.
+            const cumulativeMicros = reversalTargetMicros(event.type, obj);
+            if (cumulativeMicros <= 0) {
+              handled = { type: event.type, reversed: false, reason: "zero_refund_amount" };
+            } else {
+              const rev = await serviceRpc("advertiser_apply_deposit_refund", {
+                p_advertiser: dep.advertiser_id,
+                p_pi_id: piId,
+                p_event_id: event.id,
+                p_cumulative_micros: cumulativeMicros,
+              });
+              if (!rev.ok) return jsonErr("deposit refund reversal failed", 502, rev.data);
+              handled = { type: event.type, refund: rev.data };
+            }
           } else {
-            // Disputed/refunded amount (Stripe cents → micros); fall back to the deposit amount.
-            const disputedCents = Number(obj.amount ?? obj.amount_refunded ?? 0);
-            const rMicros = disputedCents > 0 ? centsToMicros(disputedCents) : Number(dep.amount_micros ?? 0);
-            // Stable dispute id: the dispute object id, else the charge id for a refund event.
+            // DISPUTE/chargeback: obj is a Dispute; obj.amount is the disputed amount. Idempotent on
+            // the dispute id inside the RPC. Fall back to the full deposit if amount is absent.
+            const disputedMicros = reversalTargetMicros(event.type, obj);
+            const rMicros = disputedMicros > 0 ? disputedMicros : Number(dep.amount_micros ?? 0);
             const disputeId = String(obj.id ?? `${event.type}:${piId}`);
             const rev = await serviceRpc("advertiser_apply_deposit_reversal", {
               p_advertiser: dep.advertiser_id,
@@ -223,8 +246,8 @@ Deno.serve(async (req) => {
     }
 
     await svc("POST", "stripe_webhook_events", {
-      body: { event_id: event.id, type: event.type },
-      query: "on_conflict=event_id",
+      body: { event_id: event.id, type: event.type, fn: "advertiser-portal" },
+      query: "on_conflict=event_id,fn",
       prefer: "return=minimal,resolution=ignore-duplicates",
     });
     return jsonOk({ ok: true, ...handled });

@@ -42,18 +42,24 @@ import {
   reversedMicrosFromTransfer,
   constantTimeEqual,
   payoutMinMicros,
+  findTransferIdByMetadata,   // A13
 } from "../_shared/payout-logic.mjs";
 import { parseWebhookSecrets } from "../_shared/webhook-secrets.mjs";
+import { piIdOf } from "../_shared/advertiser-logic.mjs";   // A9: normalize dispute.payment_intent
 import { paidEmail, connectNudgeEmail, sendEmail } from "../_shared/email.mjs";
+import { errorResponseBody, errorDetailEnabled } from "../_shared/http-errors.mjs";
 
 const cors = { ...corsHeaders, "Access-Control-Allow-Methods": "GET, POST, OPTIONS" } as const;
 
 function jsonOk(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, "content-type": "application/json" } });
 }
+const DEBUG_ERRORS = errorDetailEnabled(Deno.env);
 function jsonErr(message: string, status: number, detail?: unknown): Response {
-  const body: Record<string, unknown> = { error: message };
-  if (detail !== undefined && detail !== null) body.detail = detail;
+  if (detail !== undefined && detail !== null) {
+    try { console.error(`jsonErr ${status}: ${message}`, detail); } catch { /* ignore */ }
+  }
+  const body = errorResponseBody(message, detail, DEBUG_ERRORS);
   return new Response(JSON.stringify(body), { status, headers: { ...cors, "content-type": "application/json" } });
 }
 
@@ -201,8 +207,12 @@ Deno.serve(async (req) => {
     // succeeds. Recording before handling meant a handler/infra failure left a dedup row
     // that turned Stripe's retry into a permanent no-op (lost event). Both handlers are
     // idempotent, so a replay arriving before the record is harmless.
+    // A5/A9: dedup is per (event_id, fn). charge.dispute.* is ALSO delivered to the
+    // advertiser-portal endpoint with the SAME account-global event.id (both fns share this
+    // table); scoping OUR check + record to fn='stripe-connect' keeps neither endpoint from
+    // swallowing the other's delivery.
     const seen = await svc("GET", "stripe_webhook_events", {
-      query: `event_id=eq.${encodeURIComponent(event.id)}&select=event_id&limit=1`,
+      query: `event_id=eq.${encodeURIComponent(event.id)}&fn=eq.stripe-connect&select=event_id&limit=1`,
     });
     if (seen.ok && Array.isArray(seen.data) && (seen.data as unknown[]).length > 0) {
       return jsonOk({ ok: true, duplicate: true, type: event.type });
@@ -239,6 +249,32 @@ Deno.serve(async (req) => {
           if (!r.ok) return jsonErr("payout reverse failed", 502, r.data);
           handled = { type: event.type, reverse: r.data };
         }
+      } else if (event.type.startsWith("charge.dispute.")) {
+        // A9: postpay CPVA chargeback. Resolve the advertiser from advertiser_charges by the
+        // disputed PI (inside the RPC); a non-postpay PI (e.g. a deposit dispute that also fanned
+        // out here) is a clean no-op. Idempotent on the Stripe dispute id inside the RPC.
+        // A9 pass-2: this ONE serviceRpc call is also the advertiser-suspension trigger —
+        // book_postpay_chargeback now escalates a booked chargeback beyond the self-reversible
+        // line_item pause to an advertiser-level dispute hold (advertisers.dispute_hold_at), which
+        // window_open's serve path + the self-serve status RPCs honor and only an aal2 money-admin
+        // can clear. Set atomically in the RPC (service_role caller passes advertisers_protect_cols);
+        // a non-postpay no-op resolves no advertiser, so nobody is wrongly suspended.
+        const dispute = event.data.object as Stripe.Dispute;
+        const piId = piIdOf(dispute.payment_intent);
+        const disputedCents = Number(dispute.amount ?? 0);
+        if (!piId || disputedCents <= 0) {
+          handled = { type: event.type, booked: false, reason: "no_payment_intent_or_amount" };
+        } else {
+          const disputeId = String(dispute.id ?? `${event.type}:${piId}`);
+          const bad = await serviceRpc("book_postpay_chargeback", {
+            p_payment_intent_id: piId,
+            p_dispute_id: disputeId,
+            p_amount_micros: disputedCents * 10000,
+            p_reason: `stripe_${event.type}`,
+          });
+          if (!bad.ok) return jsonErr("postpay chargeback booking failed", 502, bad.data);  // transient → Stripe retries; no dedup row
+          handled = { type: event.type, chargeback: bad.data };
+        }
       } else {
         handled = { type: event.type, handled: false };
       }
@@ -248,9 +284,10 @@ Deno.serve(async (req) => {
     }
 
     // Record the dedup row AFTER success (ignore-duplicates handles the concurrent-replay race).
+    // A5/A9: scoped to fn='stripe-connect' so the shared table dedups per (event_id, fn).
     await svc("POST", "stripe_webhook_events", {
-      body: { event_id: event.id, type: event.type },
-      query: "on_conflict=event_id",
+      body: { event_id: event.id, type: event.type, fn: "stripe-connect" },
+      query: "on_conflict=event_id,fn",
       prefer: "return=minimal,resolution=ignore-duplicates",
     });
     return jsonOk({ ok: true, ...handled });
@@ -338,9 +375,9 @@ Deno.serve(async (req) => {
     // TRAP #2: transfer EVERY db-pending payout with no transfer id (recovers crashes),
     // not just the ones reserved this run.
     const pendRes = await svc("GET", "payouts", {
-      query: "status=eq.pending&stripe_transfer_id=is.null&select=id,publisher_id,amount_micros&limit=500",
+      query: "status=eq.pending&stripe_transfer_id=is.null&select=id,publisher_id,amount_micros,created_at&limit=500",
     });
-    const pending = (pendRes.data as Array<{ id: string; publisher_id: string; amount_micros: number }>) ?? [];
+    const pending = (pendRes.data as Array<{ id: string; publisher_id: string; amount_micros: number; created_at: string }>) ?? [];
 
     if (dryRun) {
       return jsonOk({ ok: true, dry_run: true, reserved: reserve.data, would_transfer: pending });
@@ -349,13 +386,14 @@ Deno.serve(async (req) => {
     let stripe: Stripe;
     try { stripe = getStripe(); } catch (err) { return jsonErr((err as { message?: string }).message ?? "Stripe not configured", 503); }
 
-    // Find any existing transfer carrying metadata.payout_id === po.id (recovers a crash
-    // between transfer and confirm, an idempotency-key-expired resume, or a replay).
-    const findExistingTransfer = async (acct: string, payoutId: string): Promise<string | null> => {
-      const existing = await stripe.transfers.list({ destination: acct, limit: 100 });
-      for (const t of existing.data) if (t.metadata?.payout_id === payoutId) return t.id;
-      return null;
-    };
+    // Find any existing transfer carrying metadata.payout_id === po.id (recovers a crash between
+    // transfer and confirm, an idempotency-key-expired resume, or a replay). A13: paginate ALL pages
+    // bounded by the payout's created_at (minus a 1-day margin) so a >24h-old orphan beyond the last
+    // 100 destination transfers is still found — never re-created (double-pay).
+    const findExistingTransfer = (acct: string, payoutId: string, createdGteUnix?: number): Promise<string | null> =>
+      findTransferIdByMetadata((params) => stripe.transfers.list(params as Stripe.TransferListParams), {
+        destination: acct, payoutId, createdGteUnix,
+      });
 
     const results: Record<string, unknown>[] = [];
     for (const po of pending) {
@@ -371,10 +409,17 @@ Deno.serve(async (req) => {
       // amount_micros is cent-aligned (reserve floors it), so this is exact.
       const cents = microsToCents(po.amount_micros);
 
+      // A13: bound the transfer scan to on/after this payout's created_at (minus a 1-day margin).
+      // An orphaned transfer, if any, was created AFTER its payout row, so this keeps a high-volume
+      // publisher's exhaustive scan cheap without ever missing the orphan.
+      const createdGteUnix = po.created_at
+        ? Math.floor(new Date(po.created_at).getTime() / 1000) - 86400
+        : undefined;
+
       // --- Phase A: obtain a transfer id (pre-check, then create only if absent) ---------
       let transferId: string | null = null;
       try {
-        transferId = await findExistingTransfer(acct, po.id);
+        transferId = await findExistingTransfer(acct, po.id, createdGteUnix);
       } catch {
         // Can't even list -> leave the payout 'pending'; the next run recovers it.
         results.push({ payout_id: po.id, status: "deferred", reason: "pre_check_failed" });
@@ -399,7 +444,7 @@ Deno.serve(async (req) => {
           // DEFINITIVE no-transfer error, and even then re-check first.
           if (classifyTransferError(err) === "definitive") {
             let recheck: string | null = null;
-            try { recheck = await findExistingTransfer(acct, po.id); } catch { recheck = null; }
+            try { recheck = await findExistingTransfer(acct, po.id, createdGteUnix); } catch { recheck = null; }
             if (recheck) {
               transferId = recheck; // it WAS created despite the error -> confirm it below.
             } else {

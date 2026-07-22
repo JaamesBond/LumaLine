@@ -25,6 +25,8 @@ export const CHECK_NAMES = [
   'billing_recon_drift',
   'payout_recon_drift',
   'reversed_charge_unrefunded',
+  'postpay_chargeback',
+  'fleet_velocity',
 ];
 
 // Payouts: terminal = paid/failed/canceled (payout_status_kind enum). A payout sitting
@@ -172,6 +174,68 @@ export function evalPayoutFailed(payouts) {
   }));
   if (alerts.length === 0) return pass(name, 'no failed payouts in window');
   return fail(name, `${alerts.length} failed payout(s) in window`, alerts);
+}
+
+/**
+ * CHECK. postpay_chargeback (HIGH) — postpay CPVA PaymentIntents disputed in the window (rows from
+ * public.advertiser_postpay_chargebacks, pre-scoped to the last 24h by created_at). Pure visibility:
+ * one alert per dispute id; auto-resolves once the row ages out of the window.
+ * @param {Array<{dispute_id?: string, advertiser_id?: string, amount_micros?: unknown, created_at?: string}>} rows
+ */
+export function evalPostpayChargebacks(rows) {
+  const name = 'postpay_chargeback';
+  const alerts = (Array.isArray(rows) ? rows : []).map((r) => ({
+    check_name: name,
+    severity: 'high',
+    dedup_key: `dispute:${r?.dispute_id ?? 'unknown'}`,
+    payload: {
+      dispute_id: r?.dispute_id ?? null,
+      advertiser_id: r?.advertiser_id ?? null,
+      amount_micros: r?.amount_micros ?? null,
+      created_at: r?.created_at ?? null,
+    },
+  }));
+  if (alerts.length === 0) return pass(name, 'no postpay chargeback in window');
+  return fail(name, `${alerts.length} postpay chargeback(s) in window`, alerts);
+}
+
+// Fleet-velocity baselines. A metric strictly ABOVE its baseline fires ONE HIGH alert (dedup per
+// metric). Advisory: surfaces distributed low-and-slow Sybil for human review; the monitor never blocks.
+// Env-overridable at the edge (passed in via `thresholds`); these are the defaults.
+export const FLEET_VELOCITY_BASELINES = {
+  provisional_impressions_1h: 20000,
+  new_publishers_1h: 200,
+  new_devices_1h: 300,
+};
+
+/**
+ * CHECK. fleet_velocity (HIGH) — aggregate fleet counters (public.monitor_fleet_velocity) exceeding a
+ * baseline. Pure over an already-fetched counters object. Unreadable/missing metric => fail loud (error).
+ * @param {Record<string, unknown>} counters
+ * @param {Record<string, number>} [thresholds]
+ */
+export function evalFleetVelocity(counters, thresholds = FLEET_VELOCITY_BASELINES) {
+  const name = 'fleet_velocity';
+  if (counters === null || typeof counters !== 'object') {
+    return errorCheck(name, `unreadable fleet counters: ${String(counters)}`);
+  }
+  const alerts = [];
+  for (const [metric, limit] of Object.entries(thresholds)) {
+    const v = toMicros(counters[metric]);         // reuse the numeric coercion (NaN => fail loud)
+    if (!Number.isFinite(v)) {
+      return errorCheck(name, `unreadable fleet metric ${metric}=${String(counters[metric])}`);
+    }
+    if (v > limit) {
+      alerts.push({
+        check_name: name,
+        severity: 'high',
+        dedup_key: `fleet:${metric}`,
+        payload: { metric, value: v, baseline: limit },
+      });
+    }
+  }
+  if (alerts.length === 0) return pass(name, 'fleet velocity within baseline');
+  return fail(name, `${alerts.length} fleet metric(s) over baseline`, alerts);
 }
 
 /**

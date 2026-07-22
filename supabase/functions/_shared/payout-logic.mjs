@@ -77,3 +77,30 @@ export function payoutMinMicros(envVal) {
   const n = Number(envVal);
   return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1000000;
 }
+
+/**
+ * Find the id of an existing transfer carrying metadata.payout_id === payoutId, paginating ALL pages
+ * (has_more / starting_after) and optionally bounding by a created lower bound. `listFn` is injected —
+ * in prod: (params) => stripe.transfers.list(params); in tests: a fake returning {data, has_more}.
+ * Returns the transfer id, or null when exhausted. Bounding by createdGteUnix keeps a high-volume
+ * publisher's scan cheap: the orphaned transfer, if it exists, was created AFTER its payout row.
+ * A13: a >24h-old orphan beyond the last 100 destination transfers must still be found, never re-created.
+ * @param {(params: Record<string, unknown>) => Promise<{data?: Array<{id?: string, metadata?: {payout_id?: string}}>, has_more?: boolean}>} listFn
+ * @param {{destination: string, payoutId: string, createdGteUnix?: number}} opts
+ * @returns {Promise<string|null>}
+ */
+export async function findTransferIdByMetadata(listFn, { destination, payoutId, createdGteUnix } = {}) {
+  let startingAfter;
+  for (;;) {
+    const params = { destination, limit: 100 };
+    if (createdGteUnix != null) params.created = { gte: createdGteUnix };
+    if (startingAfter) params.starting_after = startingAfter;
+    const page = await listFn(params);
+    const data = page && Array.isArray(page.data) ? page.data : [];
+    for (const t of data) {
+      if (t && t.metadata && t.metadata.payout_id === payoutId) return t.id;
+    }
+    if (!page || page.has_more !== true || data.length === 0) return null;
+    startingAfter = data[data.length - 1].id;
+  }
+}
