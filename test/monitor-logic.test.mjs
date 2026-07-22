@@ -347,7 +347,7 @@ test('ML33: CHECK_NAMES covers all T6 checks + the Phase-2 reversed_charge_unref
   assert.deepEqual(CHECK_NAMES, [
     'ledger_zero_sum', 'payout_stuck', 'payout_failed',
     'charge_failed', 'billing_stalled', 'billing_recon_drift', 'payout_recon_drift',
-    'reversed_charge_unrefunded',
+    'reversed_charge_unrefunded', 'postpay_chargeback', 'fleet_velocity',
   ]);
 });
 

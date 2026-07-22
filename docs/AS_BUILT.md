@@ -9,6 +9,11 @@ in progress — the **publisher portal is built + e2e-verified, not yet committe
 (PR #32 auto-payout). Earlier: M4 `feat/m4-cpc-and-branded-url`, M0 `feat/m0-production-rails`.
 **Backend project:** Supabase `prmsonskzrubqsazmpwd` (the LumaLine project — **not** the unrelated CRM `kvlfpwzmjxuapjheknnj`).
 
+> **Security-audit hardening (2026-07-22, branch `fix/security-audit-hardening`, working tree only):**
+> a two-pass internal adversarial audit closed a set of farming / DoS / self-click / Sybil / chargeback
+> residuals on the LIVE surface — see **§5g** and deferral **D13–D15**. **NOT yet committed/deployed**
+> (owner-gated). No client change; wire-compatible.
+
 > Read **this** doc and the **code** for what *is*. Read `docs/` for what's *planned*. Where the two
 > disagree, the two entries called out under **§3 Superseded** are the known traps — older docs
 > describe an in-memory `src/server/` verification design and "P0–P6" phase names that are **no longer
@@ -42,10 +47,21 @@ client's unit-test backend**, never the production path.)
    `window_beat` RPC (anti-batch ≥500 ms spacing, bound to a coarse activity bucket), and finalizes via
    `window-close` → `close_window` RPC. Crediting is **idempotent** (`impressions.window_id UNIQUE`) — a
    re-close never double-bills.
+   The heartbeat hash-chain **sequences** beats and is third-party tamper-evident; it is **not** an
+   attention proof against the publisher (the per-window challenge is the shared HMAC key). Farming is
+   gated server-side: **in-DB per-device velocity + concurrency caps in `window_open`** (concurrency ≤6
+   open/device, ≤30 opens/min/device, ≤120/min/publisher; sentinel exempt), **per-device/IP `scan_ivt`**,
+   and the 72h clawback.
 3. **Honest billing.** A real impression is recorded only after a full, activity-backed dwell; idle never
    bills. The beta **sentinel** (self-promo) identity is `gross = 0` and is **never billed**.
-4. **Click redirect.** `click` Edge Function 302-redirects through a tokenized URL; `click_resolve` RPC
-   records the click with `click_token_hash UNIQUE` dedup and a cleared-parent-impression billability gate.
+4. **Click redirect.** `click` Edge Function 302-redirects through a tokenized URL. The single-use
+   token is **minted by `lumaline-feed` and embedded only inside the Ed25519-signed `adData.clickUrl`**
+   (`window_open` stores only its hash and no longer returns the raw token to any caller); `click_resolve`
+   RPC records the click with `click_token_hash UNIQUE` dedup and a cleared-parent-impression billability gate.
+   **Self-click is neutralized (pass-2, §5g):** `click_resolve` is now **`service_role`-only** (the direct
+   `/rest/v1/rpc/click_resolve` path is revoked) and **voids same-IP clicks** — a click whose salted clicker-IP
+   hash equals the serving window's `ad_windows.ip_hash` is the serving machine (the honest single-user
+   terminal case) and is recorded `void`, never billed; `scan_click_ivt` velocity-flags cross-IP click farms.
 5. **Ledger + clawback.** Cleared revenue posts to a **double-entry, publisher-favored 60/40 ledger**
    (`ledger_entries`), with a **72-hour clawback window** and invalid-traffic scanning feeding `risk_flags`.
 
@@ -53,15 +69,20 @@ client's unit-test backend**, never the production path.)
 
 | RPC | Role |
 |---|---|
-| `window_open` | Issue a server window (salted-IP-hash rate-limited via `rl_hit`). |
-| `window_beat` | Verify + extend the HMAC heartbeat hash-chain; anti-batch timing. |
+| `window_open` | Issue a server window; **in-DB per-device velocity + concurrency caps (the real fraud gate; edge RL is bypassable)**; stamps a salted IP hash for IVT. No longer returns a click token. **Serve path excludes dispute-held advertisers** (`dispute_hold_at`) and self-deal advertiser-users (pass-2). |
+| `window_beat` | **Sequence** the heartbeat hash-chain (third-party tamper-evident; anti-batch timing). Not an attention proof vs the publisher. |
 | `close_window` | Finalize the dwell, idempotently credit one impression. |
-| `click_resolve` | Record a click (token-hash dedup, parent-impression gate). |
+| `click_resolve` | Record a click (token-hash dedup, parent-impression gate); **`service_role`-only + same-IP self-click void** (pass-2, §5g). |
 | `clawback` | Reverse a cleared entry within the 72h window (internal ledger reversal). |
-| `scan_ivt` | Invalid-traffic scan → `risk_flags`. |
+| `scan_ivt` | Invalid-traffic scan → `risk_flags`, **per publisher + per device + per IP-hash**; every 2 min (faster than clearing). |
 | `sweep_stale_windows` | Mark abandoned open windows. |
 | `clear_events` | Periodic clearing pass. |
-| `rl_hit` | Salted-IP-hash rate-limit counter (`rl_buckets`); **fails open** (cost guard, not a security control). |
+| `rl_hit` | Salted-IP-hash DB rate-limit counter (`rl_buckets`); paired with a **per-isolate in-memory fallback** in the edge so the no-salt/no-DB path is no longer silently fail-open. |
+| `scan_click_ivt` | Click-side IVT scan: per serving-device / publisher / serving-IP velocity → `risk_flags` (`ivt:click:*`) + pending `clawback_reviews`; every 2 min (pass-2). |
+| `scan_publisher_sybil` (`app.*`) | Flags ≥3 distinct publishers sharing one salted `ad_windows.ip_hash` → payout **hold** (`sybil:shared_ip`, `verified→pending`); **never auto-clawback**; daily (pass-2). |
+| `monitor_fleet_velocity` | READ-ONLY fleet counters (provisional impressions, new publishers/devices, distinct IP-hashes) for the `monitor` `fleet_velocity` HIGH check (pass-2). |
+| `signup_throttle_hit` | Durable fixed-window signup/device-code counter (fail-**closed** on empty scope); `service_role`-only (pass-2). |
+| `admin_clear_advertiser_dispute_hold` | Clears `advertisers.dispute_hold_at`; gated on the aal2 `app.money_admins` tier (same as `admin_open_clawback`); pass-2 A9. |
 
 **`app.*` helpers (private schema):** `app.accrue`, `app.activity_rank`, `app.current_publisher_id`,
 `app.is_admin`, `app.jwt_claim`, `app.ledger_group_balances`, `app.set_updated_at`, plus the `app.admins`
@@ -70,7 +91,10 @@ table.
 ### Edge Functions (`supabase/functions/`)
 
 `lumaline-feed` (signed feed + rate-limit guard, emits `keyid`), `click` (302 redirect), `window-open`,
-`window-beat`, `window-close`, and `_shared`.
+`window-beat`, `window-close`, and `_shared`. **(pass-2, §5g)** `_shared` gains a single
+**trusted-client-IP + salted-hash derivation** consumed by `lumaline-feed`, `click`, and `auth-device`,
+so the serving-window hash and the clicker / signup hash are byte-identical (standard-base64
+`sha256(LUMALINE_RL_SALT || ip)`); the `monitor` fn gains the `fleet_velocity` + `postpay_chargeback` checks.
 
 ### Schema (the 12 migrations on `main`)
 
@@ -81,8 +105,10 @@ table.
 - **Double-entry 60/40 ledger** with a zero-sum trigger; **72h clawback window**.
 - **RLS on all 16 tables**; anon `EXECUTE` revoked on all `SECURITY DEFINER` functions.
 - **pg_cron jobs** (registered when `pg_cron` is present; guarded for local): `lumaline-clear-events`
-  (hourly, `0 * * * *`), `lumaline-scan-ivt` (every 5 min, `*/5 * * * *`), `lumaline-sweep-windows`
-  (every 10 min, `*/10 * * * *`), plus an `rl_buckets` prune job.
+  (hourly, `0 * * * *`), `lumaline-scan-ivt` (every 2 min, `*/2 * * * *`), `lumaline-sweep-windows`
+  (every 10 min, `*/10 * * * *`), plus an `rl_buckets` prune job — plus (pass-2, §5g)
+  `lumaline-scan-click-ivt` (every 2 min), `lumaline-sybil-fleet-scan` (daily `41 3 * * *`), and a
+  `signup_throttle_buckets` prune (every 5 min).
 
 ---
 
@@ -528,6 +554,131 @@ CPVA-only were chosen for the later advertiser portal.
   identity `advertiser_users` + RLS isolation, prepay balance, re-scoped `admin-booking` RPCs, CPVA-only,
   guard rails against house/sentinel — largest, most review).
 
+## 5g. Security-audit hardening (branch `fix/security-audit-hardening` — working tree, NOT committed/deployed)
+
+A two-pass internal adversarial audit of the LIVE money + farming surface. **Working-tree only** — no
+commit, no deploy; owner-gated to ship. Discipline held throughout: **one coherent recreate per
+`SECURITY DEFINER` function** across both passes; every recreated money/PII RPC re-applies
+`REVOKE ALL FROM public, anon` + explicit `GRANT`s and ends with a migration-tail `DO` block that FAILS
+if `anon` retains `EXECUTE`; **no client change, no new client→server envelope field, wire-compatible**
+(the shipped v0.1.x client — edge proxy AND direct PostgREST RPC — keeps working; direct authenticated
+`EXECUTE` on `window_open`/`window_beat`/`close_window` is deliberately preserved so live clients don't break).
+
+- **Pass-1** — migrations `20260722010000`–`130000` (applied to the local stack; `node --test`
+  **653 pass / 0 fail**). Closed the billing / payout / self-deal / rate-limit / GDPR-aal2 residuals;
+  already folded into §1 (window_open in-DB velocity + concurrency caps, `scan_ivt` per device/IP every
+  2 min, `rl_hit` + per-isolate memory fallback, single-use click token minted feed-side, sentinel-exempt).
+- **Pass-2** — migrations `20260722140000`+ (this section). Closes the remaining **self-click**,
+  **IP-trust / DoS**, **Sybil**, and **A9 chargeback** residuals. New pure `node --test` suites
+  (`sec-client-ip`, `sec-selfclick-cpc`, `sec-fleet-velocity`) fail-before / pass-after; the suite count only grows.
+
+> **Coordination note:** the pass-2 clusters (P1 IP-trust, P2 self-click, P3 Sybil/A9) were specced in
+> parallel and draw from the shared `>= 20260722140000` timestamp pool; on merge the migrations take
+> **disjoint, strictly-ascending** slots and the single `window_open` / `close_window` / `click_resolve` /
+> `ensure_publisher` recreate is the latest-timestamped one for that function (no function recreated twice).
+> The **trusted-client-IP + salted-hash derivation** lives in ONE `_shared/` module so the serving-window
+> hash and the clicker / signup hash compare equal.
+
+### P1 — Trusted client-IP resolution + edge DoS keying (IP-TRUST)
+
+`rawClientIp`/`clientIpHash` (and `auth-device`'s `deviceRateOk`) read the **leftmost** `X-Forwarded-For`
+hop — 100% caller-controlled — so the memory limiter, the durable `rl_hit` bucket, and the
+`ad_windows.ip_hash` that feeds `scan_ivt` were all keyed on an attacker-chosen value. Fixed by a shared
+resolver with precedence **worker-vouched (`x-lumaline-client-ip` + a constant-time `x-lumaline-edge-proof`
+shared-secret check) → `cf-connecting-ip` → leftmost XFF → `x-real-ip`**. (The two-hop
+`client → Cloudflare → Supabase edge` topology means the *rightmost* XFF at the edge is Cloudflare's shared
+egress IP and would collapse every client into one bucket — so it is deliberately NOT used.) `close_window`
+additionally persists the window's salted `ip_hash` onto the durable `impressions` row so self-click / IVT
+forensics survive the UNLOGGED `ad_windows`.
+
+### P2 — Publisher self-click CPC farming (SELF-CLICK)
+
+The raw click token is embedded in the Ed25519-signed `adData.clickUrl`, so a serving publisher could
+extract it and self-click via `/click` or directly via `/rest/v1/rpc/click_resolve`. Closed by: (a)
+**revoking `authenticated` EXECUTE on `click_resolve`, granting `service_role` only** — the shipped client
+never calls it; only the `click` edge fn does, and it always derives the trusted clicker IP (kills the
+direct-RPC path outright); (b) a **same-IP void** — a click whose salted clicker-IP hash equals the serving
+window's `ad_windows.ip_hash` is the serving machine and is recorded `void`, never billed
+(`self_click_same_ip`); (c) **`scan_click_ivt`** (every 2 min) velocity-flags per serving-device /
+publisher / serving-IP click farms into `risk_flags` (`ivt:click:*`) + a pending `clawback_reviews` row,
+which the existing `clear_events` predicate withholds until an admin resolves (reject releases a false
+positive). **Honest-model tradeoff, documented loudly:** in a single-user terminal the publisher *is* the
+end user, so a genuine click is same-machine — treating same-IP clicks as owner self-views forfeits nearly
+all CPC revenue, which is acceptable because CPC is already marginal (OSC-8 status-bar clicks fire only in
+IDE terminals, upstream #26356; CPVA/views is the dependable model everywhere).
+
+### P3 — Sybil throttles + fleet anomaly monitor + A9 chargeback suspension
+
+- **Signup / device-code throttle** — `signup_throttle_hit` durable fixed-window counter (fail-**closed**
+  on empty scope) on `auth-device /device/code` (global + per-trusted-IP scopes), layered over the existing
+  per-isolate limiter; plus a **global new-publisher-per-minute cap inside `ensure_publisher`** on the
+  CREATE path only (returning users are never throttled; the browser calls PostgREST directly so no client
+  IP is available there — the per-IP dimension lives at the device-code edge).
+- **Fleet Sybil scan** — `app.scan_publisher_sybil` (daily) flags ≥ `p_min_pub` (default 3) distinct real
+  publishers serving from ONE salted `ad_windows.ip_hash` as a cluster → **payout HOLD**
+  (`publisher_payout_holds` reason `sybil:shared_ip` + `payout_status verified→pending`), **hold-only,
+  never auto-clawback** (human review). **No free-email whitelist** (a pure-Sybil farm uses gmail — the gap
+  `scan_selfdeal_risk` deliberately left). `publishers.stripe_account_id` is UNIQUE, so a literal
+  shared-payout-account Sybil is structurally impossible; payout-account clustering is intentionally omitted.
+- **Fleet-velocity monitor** — READ-ONLY `monitor_fleet_velocity` counters wired into the `monitor` edge fn
+  as a new `fleet_velocity` HIGH check (surfaces distributed low-and-slow Sybil the per-entity `scan_ivt`
+  cannot see; alerts a human, never blocks). Also wires pass-1's shipped-but-unwired `evalPostpayChargebacks`
+  as the live `postpay_chargeback` check.
+- **A9 — advertiser dispute hold** — a postpay chargeback previously only paused `line_items`, which the M9
+  advertiser self-serve RPCs (`advertiser_set_line_item_status` / `advertiser_set_campaign_status`) could
+  flip straight back to `active`, and `window_open`'s serve path checked only `a.status='active'`. New
+  advertiser-level `advertisers.dispute_hold_at` (a protected column; service_role/admin-only via
+  `advertisers_protect_cols`), **set by `book_postpay_chargeback`**, **gates `window_open`'s real-publisher
+  serve path** (`and a.dispute_hold_at is null`), and **blocks self-serve resume** in both status RPCs.
+  Cleared only by `admin_clear_advertiser_dispute_hold`, gated on the **M8 aal2 `app.money_admins` tier**
+  (same gate as `admin_open_clawback`).
+
+### Bounded residuals (honest — NOT code-eliminable)
+
+1. **Direct-RPC / Cloudflare-bypass IP spoofing → IP is advisory.** A caller that bypasses Cloudflare and
+   hits `*.supabase.co` (or calls `/rest/v1/rpc/window_open` directly) can still send an arbitrary
+   `cf-connecting-ip` / XFF / `x-lumaline-client-ip` with no valid edge-proof → the resolver marks it
+   `trusted:false` and the IP is **best-effort / advisory**; the per-IP dimension of `scan_ivt` /
+   `scan_publisher_sybil` is inert against them. The **hard bound is the IP-independent in-DB per-device /
+   per-publisher velocity + concurrency caps** in `window_open` (unchanged). Real fix = ops (D14).
+2. **Cross-IP low-and-slow self-click.** Clicking one's own served ads from a *different* network
+   (VPN / phone) escapes the same-IP void. Bounded by `scan_click_ivt` on the **serving**
+   device / publisher / IP (the farm still generates every window on one machine), P1's `window_open`
+   open-velocity caps, the parent impression having to independently clear under `scan_ivt`, and CPC firing
+   only in IDE terminals (#26356). Net CPC yield per farm machine is tightly capped and self-defeating.
+3. **Cross-identity low-and-slow Sybil.** N accounts across N distinct KYC identities / emails / trusted IPs,
+   each under every per-entity cap and below the shared-IP cluster threshold. **Operational, not a query:**
+   Stripe **KYC** at payout onboarding + the **7-day payout hold > 72h clawback** (unpaid Sybil earnings sit
+   held and reviewable; paid earnings can't be clawed but require passing KYC first) + the **payout-hold
+   review queue** (fed by `scan_publisher_sybil`) + the **fleet-velocity monitor**. Recorded as **D15**.
+4. **Same human, many Stripe Connect accounts.** `stripe_account_id` UNIQUE blocks the literal shared-account
+   Sybil; distinct Connect accounts backed by one human/bank are Stripe KYC's job.
+5. **Per-IP throttle vs CGNAT / shared-office IP.** A per-IP signup / cluster cap can false-positive legit
+   users behind one NAT, so per-IP is a *moderate* cap; the always-on GLOBAL cap + the monitor are the real
+   bound, and `scan_publisher_sybil` is **hold-only** (a false cluster costs a review, never a wrong reversal).
+
+### Ops-layer recommendations (NOT code — owner / infra)
+
+- **Cloudflare WAF / rate-limit** on `feed.lumaline.dev` + `c.lumaline.dev` / `auth-device` keyed on
+  `cf-connecting-ip` (unspoofable at the CF edge) — the durable DoS control; the edge limiter stays a cheap
+  secondary floor. Optionally **restrict direct `*.supabase.co` origin access** (Authenticated Origin Pulls,
+  or require `x-lumaline-edge-proof` at the edge and 401 without it) to remove the bypass path — a policy
+  decision that **would break the documented direct-PostgREST-RPC wire-compat**, so it stays a recommendation
+  (both tracked as **D14**).
+- Set the new secret **`LUMALINE_EDGE_PROOF`** in Supabase Vault + the Cloudflare Worker env (unset ⇒ proof
+  path disabled ⇒ resolver falls back to `cf-connecting-ip`, still strictly better than leftmost-XFF).
+- **Schedule** the new crons (`scan_click_ivt`, `scan_publisher_sybil`, the `fleet_velocity` +
+  `postpay_chargeback` monitor checks, the `signup_throttle_buckets` prune) and **calibrate** thresholds
+  (`FLEET_VELOCITY_BASELINES`, `p_min_pub`, `MAX_NEW_PUB_PER_MIN`, `LUMALINE_DEVCODE_*`) against real launch
+  traffic before tightening.
+- Ensure the owner is in **`app.money_admins` with a verified aal2 session** BEFORE relying on
+  `admin_clear_advertiser_dispute_hold` (M8 self-lockout hazard: an all-aal1 admin base cannot clear a hold).
+- Consider **disabling CPC** (`cpc_bid_micros = 0`, unambiguously CPVA-only) since the same-IP void makes CPC
+  near-non-earning in the current single-user product, or keep it live for the rare cross-IP IDE case and
+  monitor `ivt:click:*` volume. Document the same-IP-void policy in the publisher terms / transparency report.
+- Build a lightweight admin view over open `publisher_payout_holds` (`sybil:shared_ip` / `selfdeal:shared_email`)
+  + `advertiser_postpay_chargebacks` so the review queue is actioned.
+
 ## 6. Deferral ledger
 
 Genuine deferrals, recorded so none is silently lost. Each names the **reason** and the **milestone/owner**
@@ -547,6 +698,9 @@ that closes it.
 | **D10** | **M1 — `/earnings` does not re-check `devices.revoked_at`** (a token minted just before logout can read its *own* earnings until exp ≤15 min). | **Self-data only**, RLS-scoped to the caller; zero billing/cross-publisher impact; time-bounded by the short TTL. | **M3** (add a server-side `revoked_at` check on the `/earnings` handler) |
 | **D11** | **M4 — CPC advertiser charges have no automated Stripe refund path.** The refund handler (`billing/index.ts`) looks up `advertiser_charges` by `impression_id`, but CPC charges carry `impression_id = NULL`, so a CPC charge can only be **manually** refunded via Stripe today. | **Internal ledger stays correct**: `public.clawback` reverses *both* the impression and click ledger groups for the window, so this is missing Stripe-side *automation* only, not ledger corruption. M4's scope was "wire CPC into the money path"; M4 creates the precondition, so the refund automation is a tracked follow-up. Manual refund remains available. | **M5/M6** (add a click-keyed branch to the refund handler + `clawback_reviews`) |
 | **D12** | **M4 — webhook integration tests W8/W9/W11 hard-fail (don't skip) on a partially-configured stack.** They assert `200` for platform/connect-signed events, so a `supabase functions serve` running with only the local dev secret yields `400` → red instead of skip. | Cosmetic test-hygiene gap: the whole integration suite already requires a manually-configured stack + `.env` (the header documents the two-secret precondition); a correctly-configured stack passes. W10 (asserts `400`) is robust regardless. No production impact. | **M6** (gate W8/W9/W11 on served-secret presence) |
+| **D13** | **Per-clicker-IP dimension for `scan_click_ivt`** (P2, §5g) — an `ivt:click:clkip` velocity branch keyed on the *clicker's* salted IP, not just the serving side. | The pass-2 gate already voids same-IP clicks in `click_resolve`, and `scan_click_ivt` bounds farms on **serving-side** device/publisher/IP; a per-clicker-IP column would add an end-user IP hash to the **publisher-readable** `clicks` table (`clicks_select_own` RLS), so it needs a `revoke select (clicker_ip_hash)` column-grant to stay data-minimal. Omitted to keep the migration data-minimal. | **Future hardening** (add `clicks.clicker_ip_hash` + column revoke + the `ivt:click:clkip` branch). |
+| **D14** | **Ops-layer DoS + direct-origin hardening** (P1, §5g) — Cloudflare WAF / rate-limit keyed on `cf-connecting-ip`; optionally lock direct `*.supabase.co` origin access or require `x-lumaline-edge-proof` at the edge. | The edge resolver already upgrades DoS/IVT keying on the Cloudflare path (trusted vouch → `cf-connecting-ip`), and the **hard bound is the IP-independent in-DB per-device/per-publisher caps**; the WAF is the durable DoS control and the origin-lock removes the bypass but **would break the documented direct-PostgREST-RPC wire-compat**, so it is an infra/policy decision, not code. | **Owner / infra (ops)** |
+| **D15** | **Cross-identity / cross-IP low-and-slow Sybil** (P3, §5g) — N accounts across N distinct KYC identities / emails / trusted IPs, each under every per-entity cap and below the shared-IP cluster threshold. | **Not code-eliminable by design.** Bounded operationally: Stripe **KYC** at payout onboarding, the **7-day payout hold > 72h clawback** (unpaid Sybil earnings sit held + reviewable), the **payout-hold review queue** (fed by `scan_publisher_sybil`), and the **fleet-velocity monitor**. Recorded so the accepted residual is never mistaken for closed. | **Operational** (KYC + human review; accepted residual) |
 
 ---
 
@@ -569,7 +723,9 @@ that closes it.
 
 - **What IS (code):** `src/statusline.mjs`, `src/client/window.mjs`, `src/client/auth.mjs`,
   `src/lib/{crypto,keyring,url}.mjs`, `src/config.mjs`; `supabase/migrations/` (**34 on `main`** + 3
-  uncommitted M7 = 37 on disk); `supabase/functions/` (`lumaline-feed`, `auth-device`, `billing`,
+  uncommitted M7 = 37 on disk; the `fix/security-audit-hardening` working tree further adds the pass-1
+  `20260722010000`–`130000` + pass-2 `20260722140000`+ hardening migrations, §5g, uncommitted);
+  `supabase/functions/` (`lumaline-feed`, `auth-device`, `billing`,
   `stripe-connect`, `monitor`, `admin-booking`, `click`, `window-open|beat|close`, `_shared`); `test/`
   (**49 files** — hermetic unit ≈147 + integration that self-skip without a local stack; the count only grows).
   **NB:** §4's "49 tests" table is the M0-era snapshot, not the current total.

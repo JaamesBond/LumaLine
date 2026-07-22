@@ -120,7 +120,7 @@ LumaLine wires a command into Claude Code's official
 
 1. **Sanctioned surface** — runs only as the official `statusLine` command. Nothing patched, nothing injected.
 2. **Signed content** — fetches the current ad and **verifies its Ed25519 signature** against the bundled public key. Anything unsigned or forged is refused; the client shows your plain status instead.
-3. **Honest billing** — opens a *server-verified* dwell window, posts a per-second heartbeat hash-chain bound to real agent activity, and records **one** impression only after a full, honest dwell — **never during idle**.
+3. **Honest billing** — opens a *server-verified* dwell window and posts a per-second heartbeat hash-chain that sequences the beats and is tamper-evident to third parties; the **server** measures the real dwell wall-clock and per-device velocity and records **one** impression only after a full dwell with activity — **never during idle**. (The chain sequences beats; the server-measured dwell + velocity/invalid-traffic caps, not the chain alone, are what gate crediting.)
 4. **Transparent ledger** — when earnings turn on at GA, revenue clears on a publisher-favored **60/40** double-entry ledger with a 72h clawback window and invalid-traffic scanning. (During the beta the self-promo line is **`gross = 0` — counted as a view, never billed.**)
 
 `refreshInterval: 1` keeps the line live even through long idle, but **billable impressions only

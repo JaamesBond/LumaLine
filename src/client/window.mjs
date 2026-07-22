@@ -10,6 +10,13 @@
 //     detect change is kept locally in state.lastActivityValue and never sent;
 //   - close is best-effort (the server credits idempotently), so a lost close response
 //     never re-bills.
+//
+// WHAT THE HEARTBEAT CHAIN IS (and is NOT): the per-window `challenge` returned by /window/open IS
+// the HMAC key, so this chain SEQUENCES beats and makes THIRD-PARTY tampering evident — it is NOT a
+// proof of attention against the publisher, who holds the same key and could synthesize beats. The
+// real anti-farm enforcement is SERVER-SIDE: in-DB per-device velocity + concurrency caps in
+// window_open, per-device/IP scan_ivt, and the 72h clawback. The chain is kept because sequencing +
+// third-party tamper-evidence still add value; it is just not the fraud gate.
 import { hmacHex } from '../lib/crypto.mjs';
 import { safeClickUrl } from '../lib/url.mjs';
 
@@ -58,6 +65,9 @@ export async function step({ state, now, activity, post, cfg }) {
     // tests); fall back to `now` when absent so the pure-clock tests stay deterministic.
     const startedAt = cfg.clock ? cfg.clock() : now;
     state = {
+      // `challenge` is the server-issued per-window HMAC KEY (shared with us by design): it lets us
+      // SEQUENCE beats + makes third-party tampering evident; it is NOT an attention proof vs the
+      // publisher. Real anti-farm gates are server-side (velocity caps + scan_ivt + clawback).
       windowId: w.windowId, challenge: w.challenge, seq: 0, prevHash: w.windowId,
       startedAt, dwellMs: w.dwellMs, hbIntervalMs: w.hbIntervalMs,
       line: ad.line, label: ad.label ?? 'sponsored', clickUrl: ad.clickUrl,

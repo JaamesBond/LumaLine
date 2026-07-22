@@ -19,12 +19,42 @@
 //     re-serialize it.
 //   * NEVER BILLED — the sentinel line_item has cpva_bid_micros=0 AND cpc_bid_micros=0, so
 //     close_window credits a *view* with gross=0 and click_resolve bills 0. Honest billing.
-//   * NO OPEN REDIRECT — clickUrl points at the `click` function with the server-minted,
-//     single-use click_token; the real destination is resolved server-side from the booked
-//     creative (click_resolve), never asserted by this function or echoed from the request.
+//   * NO OPEN REDIRECT — clickUrl points at the `click` function with the edge-minted, single-use
+//     click token embedded ONLY inside the signed adData; window_open stores only its hash and never
+//     returns the raw token to any caller. The real destination is resolved server-side from the
+//     booked creative (click_resolve), never asserted by this function or echoed from the request.
 //   * verify_jwt = false (this is the only public entrypoint; see supabase/config.toml).
 import { corsHeaders, json } from "../_shared/cors.ts";
 import { forwardRpc, bearerHeader, verifyDeviceJwt } from "../_shared/jwt.ts";
+import { createMemoryLimiter } from "../_shared/ratelimit.mjs";
+import { resolveClientIp, saltedIpHash } from "../_shared/client-ip.mjs";
+
+// sha256 hex — MUST match Postgres encode(digest(token,'sha256'),'hex') so click_resolve resolves
+// the token window_open stored as click_token_hash.
+async function sha256hex(s: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+// Opaque single-use click token (48 hex chars, == the old window_open gen_random_bytes(24)).
+function mintClickToken(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(24)),
+    (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// D1: per-isolate in-memory fallback limiter (raw IP kept only in this Map, never persisted). This
+// is the fail-CLOSED floor for the no-DB paths and when LUMALINE_RL_SALT is unset. Separate buckets
+// so a burst on /window/open cannot exhaust /line's budget.
+const memLimit = createMemoryLimiter({ max: Number(Deno.env.get("LUMALINE_RL_MEM_PER_MIN") ?? "120"), windowMs: 60000 });
+let rlSaltWarned = false;
+// TRUSTED client-IP resolution (see _shared/client-ip.mjs). OLD code used xff[0] (fully
+// client-controlled). Precedence now: worker-vouched (x-lumaline-client-ip + LUMALINE_EDGE_PROOF)
+// -> cf-connecting-ip -> leftmost XFF -> x-real-ip. Direct-to-*.supabase.co callers that bypass the
+// worker still forge headers => IP is DEFENSE-IN-DEPTH; the hard bound is window_open's in-DB
+// per-device/per-publisher velocity caps (migration 20260722120000).
+async function resolveIp(req: Request): Promise<string> {
+  const { ip } = await resolveClientIp(req.headers, Deno.env.get("LUMALINE_EDGE_PROOF") ?? "");
+  return ip;
+}
 
 // Sentinel identity — matches supabase/seed.prod.sql. Not a secret (it is the "anon, never
 // paid" publisher); env-overridable for flexibility, defaults to the seeded UUIDs.
@@ -122,24 +152,38 @@ async function signAd(adData: string): Promise<string> {
 // The salt makes the hash non-reversible (raw IPv4 space is otherwise brute-forceable), so
 // this stays within the data-minimization invariant. No salt set => rate limiting is OFF
 // (fail-open), which makes deploying the code BEFORE the secret exists a no-op.
-async function clientIpHash(req: Request): Promise<string | null> {
+async function clientIpHash(ip: string): Promise<string | null> {
   const salt = Deno.env.get("LUMALINE_RL_SALT");
-  if (!salt) return null;
-  const ip = (req.headers.get("x-forwarded-for") ?? "").split(",")[0].trim();
-  if (!ip) return null;
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(salt + ip));
-  return btoa(String.fromCharCode(...new Uint8Array(buf)));
+  if (!salt || !ip) return null;
+  return await saltedIpHash(salt, ip);   // standard base64 of sha256(salt||ip); byte-identical to legacy
 }
-// True = allowed. Fail-OPEN on any error / missing config: rate limiting is a cost+abuse
-// guard, NOT a security control (signing + least-privilege grants are), and nothing is ever
-// billed on this feed — so availability wins over a perfect block on an rl backend hiccup.
-async function rateLimitOk(req: Request, auth: string): Promise<boolean> {
-  const ipHash = await clientIpHash(req);
+// D1: cost/abuse guard applied to EVERY endpoint. Two layers:
+//   (1) an in-memory per-isolate limiter that ALWAYS runs (the fail-CLOSED floor — bounds a flood
+//       even with no salt and no DB), and
+//   (2) the durable salted-IP DB limiter (rl_hit) when LUMALINE_RL_SALT is set (cross-isolate).
+// When the salt is unset we emit a one-time misconfig alert (edge logs) and rely on layer (1) —
+// the no-DB path is no longer silently fail-open. Rate limiting is still NOT the security control
+// (signing + least-privilege grants are) and nothing bills on this feed, so a DB hiccup fails open
+// on layer (2) only; layer (1) always applies.
+async function rateLimitOk(ip: string, auth: string, bucket: string): Promise<boolean> {
+  const now = Date.now();
+  if (ip && !memLimit.hit(`${bucket}:${ip}`, now)) return false;   // layer (1): fail-closed floor
+
+  const salt = Deno.env.get("LUMALINE_RL_SALT");
+  if (!salt) {
+    if (!rlSaltWarned) {
+      rlSaltWarned = true;
+      console.error("lumaline-feed: LUMALINE_RL_SALT unset — durable salted-IP rate limit OFF; " +
+        "relying on the per-isolate in-memory limiter only. Set LUMALINE_RL_SALT in prod.");
+    }
+    return true;   // in-memory layer already applied
+  }
+  const ipHash = await clientIpHash(ip);
   if (!ipHash) return true;
   const max = Number(Deno.env.get("LUMALINE_RL_MAX_PER_MIN") ?? "30");
   try {
     const { status, text } = await forwardRpc("rl_hit", { p_ip_hash: ipHash, p_max: max }, auth);
-    if (status !== 200) return true;
+    if (status !== 200) return true;            // DB hiccup: layer (1) still applied
     return JSON.parse(text) === true;
   } catch { return true; }
 }
@@ -150,6 +194,7 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
 
   const path = new URL(req.url).pathname; // e.g. /lumaline-feed/window/open
+  const clientIp = await resolveIp(req);  // trusted-source client IP for RL + IVT/ip binding
   let body: Record<string, unknown> = {};
   try { body = await req.json(); } catch { /* empty body ok */ }
 
@@ -161,6 +206,11 @@ Deno.serve(async (req) => {
   // so no sentinel-JWT mint), and is safe for the client to cache for hours. It is signed with the
   // SAME key + keyid as /window/open, so the client's signed-content-only rule is fully preserved.
   if (path.endsWith("/line")) {
+    // D1: /line is cached hours client-side but still floodable — bound it (in-memory only; /line
+    // deliberately mints no JWT, so no DB rl_hit here).
+    if (clientIp && !memLimit.hit(`line:${clientIp}`, Date.now())) {
+      return json({ error: "rate limited" }, 429);
+    }
     try { await signKey(); }
     catch (e) { return json({ error: "feed misconfigured", detail: (e as Error).message }, 500); }
     const line  = Deno.env.get("LUMALINE_SELFPROMO_LINE")  ?? "LumaLine — honest, signed ads for Claude Code";
@@ -190,16 +240,27 @@ Deno.serve(async (req) => {
     catch (e) { return json({ error: "feed misconfigured", detail: (e as Error).message }, 500); }
 
     // Cost/abuse guard: rate-limit by salted IP hash BEFORE window_open inserts a DB row.
-    if (!(await rateLimitOk(req, auth))) return json({ error: "rate limited" }, 429);
+    if (!(await rateLimitOk(clientIp, auth, "open"))) return json({ error: "rate limited" }, 429);
 
     const snapshot = (body?.activitySnapshot as string) ?? "session";
-    let { status, text } = await forwardRpc("window_open", { p_activity_snapshot: snapshot }, auth);
-    // Honest fallback: a real device token that the RPC rejects (revoked/unknown device, or a
-    // token the gateway expired) must not blank the line. Retry the open under the sentinel so
-    // the user still sees a gross=0 ad — nothing accrues to them, nothing accrues to anyone.
+    // B4: the token is minted HERE (edge) and rides ONLY inside the Ed25519-signed adData.clickUrl.
+    // window_open receives only its sha256 hash and never returns the raw token to any caller. Also
+    // pass the salted IP hash so scan_ivt can be per-IP aware (ad_windows.ip_hash).
+    const clickToken = mintClickToken();
+    const clickTokenHash = await sha256hex(clickToken);
+    const ipHash = await clientIpHash(clientIp);   // salted, trusted-source; null when RL_SALT unset
+    const openArgs = {
+      p_activity_snapshot: snapshot,
+      p_click_token_hash: clickTokenHash,
+      p_client_ip_hash: ipHash,
+    };
+    let { status, text } = await forwardRpc("window_open", openArgs, auth);
+    // Honest fallback: a real device token the RPC rejects (revoked/unknown device, gateway-expired,
+    // OR now an over-cap rate-limit) must not blank the line. Retry the open under the sentinel
+    // (cap-EXEMPT, gross=0) so the user still sees an ad — nothing accrues to them or anyone.
     if (status !== 200 && isReal) {
       const sentinel = `Bearer ${await mintSentinelJwt()}`;
-      ({ status, text } = await forwardRpc("window_open", { p_activity_snapshot: snapshot }, sentinel));
+      ({ status, text } = await forwardRpc("window_open", openArgs, sentinel));
     }
     if (status !== 200) return new Response(text, { status, headers: { ...corsHeaders, "content-type": "application/json" } });
 
@@ -211,21 +272,19 @@ Deno.serve(async (req) => {
     if (ad.house || !ad.line) return json({ error: "no fill" }, 503);
 
     const windowId = rpc.window_id as string;
-    // Tokenized click redirect through the branded domain (c.lumaline.dev/c/<token>) so clicks
-    // are tracked → CPC. The opaque single-use token was minted by window_open and rides ONLY
-    // embedded in the Ed25519-signed adData.clickUrl (never returned separately); the `click` fn
-    // resolves it to a 302 at the advertiser dest. No open-redirect risk: the URL is signed by us
-    // and the client re-validates http(s). Falls back to the direct dest if no token was minted
-    // (defensive). LUMALINE_CLICK_BASE defaults to the branded proxy; override for local dev.
-    const dest = Deno.env.get("LUMALINE_SELFPROMO_DEST") ?? "https://lumaline.dev";
+    // Tokenized click redirect through the branded domain (c.lumaline.dev/c/<clickToken>) so clicks
+    // are tracked → CPC. B4: the opaque single-use token is minted HERE (edge) and rides ONLY inside
+    // the Ed25519-signed adData.clickUrl — window_open stores only its sha256 hash and no longer
+    // returns the raw token to any caller. The `click` fn resolves it (click_resolve hashes the token
+    // to the stored click_token_hash) to a 302 at the advertiser dest. No open-redirect risk: the URL
+    // is signed by us and the client re-validates http(s). LUMALINE_CLICK_BASE defaults to the branded
+    // proxy; override for local dev.
     const clickBase = Deno.env.get("LUMALINE_CLICK_BASE") ?? "https://c.lumaline.dev";
-    const token = rpc.click_token as string | undefined;
-    // View-only creatives (no booked dest_url) must NOT surface a click URL. window_open mints a
-    // token unconditionally, but resolving c.lumaline.dev/c/<token> for a destination-less creative
-    // 404s — and the client would render that as a dead inline link (worse in terminals where the
-    // OSC-8 hyperlink is stripped, so the raw URL shows as text). Emit a clickUrl ONLY when the
-    // creative actually has a destination (has_dest); otherwise null → the client shows no URL.
-    const clickUrl = ad.has_dest ? (token ? `${clickBase}/c/${token}` : dest) : null;
+    // View-only creatives (no booked dest_url) surface NO click URL. Resolving c.lumaline.dev/c/<token>
+    // for a destination-less creative 404s — and the client would render that as a dead inline link
+    // (worse in terminals where the OSC-8 hyperlink is stripped, so the raw URL shows as text). Emit a
+    // clickUrl ONLY when the creative has a destination (has_dest); otherwise null → the client shows none.
+    const clickUrl = ad.has_dest ? `${clickBase}/c/${clickToken}` : null;
     // Build the signed string ONCE and transport it verbatim. JSON.parse(adData).windowId
     // MUST equal windowId or the client refuses (window.mjs:41).
     const adData = JSON.stringify({ windowId, line: ad.line, label: ad.label ?? "sponsored", clickUrl });

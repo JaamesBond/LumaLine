@@ -56,6 +56,8 @@ import {
   batchIdempotencyKey,
   planAdvertiserCharges,
   partitionPendingByBatch,
+  shouldAdoptPi,
+  chooseSettleRoute,
 } from "../_shared/billing-logic.mjs";
 
 const billingCors = {
@@ -291,6 +293,7 @@ async function reservePending(
   groups: PendingGroup[],
   advertiserId: string,
   batchId: string,
+  settleMode: "postpay" | "prepay",
 ): Promise<void> {
   if (groups.length === 0) return;
   const rows = groups.map((g) => ({
@@ -301,6 +304,8 @@ async function reservePending(
     amount_cents:    microsToCents(g.amount_micros),
     status:          "pending",
     charge_batch_id: batchId,
+    settle_mode:     settleMode,   // A11: freeze the settle route; recovery routes by THIS, not the
+                                   // advertiser's later (possibly flipped) billing_mode.
     attempted_at:    new Date().toISOString(),
   }));
   await svc("POST", "advertiser_charges", {
@@ -425,25 +430,49 @@ async function settleReservedBatch(
 
   try {
     const stripe = getStripe();
-    const intent = await stripe.paymentIntents.create(
-      {
-        amount:         amountCents,
-        currency:       "eur",
-        customer:       customerId,
-        payment_method: pm,
-        confirm:        true,
-        off_session:    true,
-        description:    `LumaLine CPVA — ${adv.advertiser_name ?? adv.advertiser_id} — ${chargeSet.length} impression(s)`,
-        metadata: {
-          source:          "lumaline",         // enables /reconcile Stripe-side filter
-          kind:            "cpva_aggregate",
-          advertiser_id:   adv.advertiser_id,
-          charge_batch_id: batchId,
-          group_count:     String(chargeSet.length),
-        },
-      },
-      { idempotencyKey: batchIdempotencyKey(batchId) },   // IMMUTABLE per batch
-    );
+
+    // A1 (double-charge on >24h recovery): Stripe idempotency keys expire ~24h. /charge is manual, so
+    // a recovery retry of a crashed batch can run days later — past the key's TTL — and a bare
+    // paymentIntents.create would mint a SECOND PI and double-charge a live card. Before creating,
+    // ADOPT any PI already carrying this batch's charge_batch_id (mirrors the payout metadata.payout_id
+    // pre-check in stripe-connect). The idempotency key still guards the <24h window (incl. Search's
+    // brief post-create indexing lag), so the layers compose: Search covers >24h, the key covers <24h.
+    // Batch membership is frozen at reserve, so an adopted PI's amount always equals amountCents.
+    let adoptedId: string | null = null;
+    try {
+      const found = await stripe.paymentIntents.search({
+        query: `metadata['charge_batch_id']:'${batchId}'`,
+        limit: 10,
+      });
+      for (const pi of found.data) {
+        if (shouldAdoptPi(pi.status)) { adoptedId = pi.id; break; }
+      }
+    } catch (_searchErr) {
+      // Search unavailable/errored → fall through to create; the idempotency key still dedups <24h.
+      adoptedId = null;
+    }
+
+    const intent = adoptedId
+      ? { id: adoptedId }
+      : await stripe.paymentIntents.create(
+          {
+            amount:         amountCents,
+            currency:       "eur",
+            customer:       customerId,
+            payment_method: pm,
+            confirm:        true,
+            off_session:    true,
+            description:    `LumaLine CPVA — ${adv.advertiser_name ?? adv.advertiser_id} — ${chargeSet.length} impression(s)`,
+            metadata: {
+              source:          "lumaline",         // enables /reconcile Stripe-side filter
+              kind:            "cpva_aggregate",
+              advertiser_id:   adv.advertiser_id,
+              charge_batch_id: batchId,
+              group_count:     String(chargeSet.length),
+            },
+          },
+          { idempotencyKey: batchIdempotencyKey(batchId) },   // IMMUTABLE per batch
+        );
 
     await markPendingCharged(ids, intent.id, customerId);
 
@@ -508,7 +537,7 @@ async function chargeFreshBatch(plan: AdvertiserPlan): Promise<Record<string, un
     return { advertiser_id: plan.advertiser_id, status: "failed", reason: resolved.error };
   }
   const batchId = crypto.randomUUID();
-  await reservePending(plan.groups, plan.advertiser_id, batchId);
+  await reservePending(plan.groups, plan.advertiser_id, batchId, "postpay");
   return await settleReservedBatch(batchId, adv, resolved.customerId, resolved.pm);
 }
 
@@ -518,6 +547,10 @@ async function chargeFreshBatch(plan: AdvertiserPlan): Promise<Record<string, un
 async function recoverBatch(batchId: string, adv: BatchAdvertiser): Promise<Record<string, unknown>> {
   const resolved = await resolveCustomerAndPm(adv);
   if ("skip" in resolved) {
+    // A10: mirror the fresh-charge no-PM path (chargeFreshBatch) — pause serving so we never extend
+    // credit without a working payment method. The batch stays pending for a later retry once a PM is
+    // saved (retryable, not terminal), identical to the fresh-path semantics.
+    await pauseAdvertiserLineItems(adv.advertiser_id);
     return { advertiser_id: adv.advertiser_id, status: "skipped", reason: resolved.skip, batch_id: batchId };
   }
   if ("error" in resolved) {
@@ -591,7 +624,7 @@ async function chargePrepayBatch(plan: AdvertiserPlan): Promise<Record<string, u
     stripe_customer_id: plan.stripe_customer_id, is_house: false, billing_mode: "prepay",
   };
   const batchId = crypto.randomUUID();
-  await reservePending(plan.groups, plan.advertiser_id, batchId);
+  await reservePending(plan.groups, plan.advertiser_id, batchId, "prepay");
   return await settlePrepayBatch(batchId, adv);
 }
 
@@ -693,11 +726,11 @@ Deno.serve(async (req) => {
       // rows), grouped by its stable charge_batch_id — independent of the fresh plans below, so a
       // pending batch is never stranded by a same-advertiser skip (adversarial review F3).
       const pendRes = await svc("GET", "advertiser_charges", {
-        query: "status=eq.pending&stripe_charge_id=is.null&select=charge_batch_id,advertiser_id,entry_group_id&limit=1000",
+        query: "status=eq.pending&stripe_charge_id=is.null&select=charge_batch_id,advertiser_id,entry_group_id,settle_mode&limit=1000",
       });
       const batches = partitionPendingByBatch(
         Array.isArray(pendRes.data)
-          ? (pendRes.data as Array<{ charge_batch_id: string | null; advertiser_id: string; entry_group_id: string }>)
+          ? (pendRes.data as Array<{ charge_batch_id: string | null; advertiser_id: string; entry_group_id: string; settle_mode?: string | null }>)
           : [],
       );
       for (const [batchId, batch] of batches) {
@@ -718,9 +751,14 @@ Deno.serve(async (req) => {
           stripe_customer_id: a?.stripe_customer_id ?? null, is_house: a?.is_house === true,
           billing_mode: a?.billing_mode ?? "postpay",
         };
-        // Route a recovered PREPAY batch to the draw-down (no Stripe PM), postpay to the Stripe path.
+        // A11: route by the settle_mode FROZEN on the batch at reserve, NOT the advertiser's CURRENT
+        // billing_mode. A mode flip between reserve and recovery must not re-route a half-settled batch
+        // (draw prepay balance AND charge Stripe = double-collect). Legacy rows (settle_mode NULL) fall
+        // back to the current billing_mode, preserving pre-migration behavior.
+        const frozenMode = (batch.rows as Array<{ settle_mode?: string | null }>)[0]?.settle_mode ?? null;
+        const route = chooseSettleRoute(frozenMode, recAdv.billing_mode);
         results.push(
-          recAdv.billing_mode === "prepay"
+          route === "prepay"
             ? await settlePrepayBatch(batchId, recAdv)
             : await recoverBatch(batchId, recAdv),
         );
@@ -843,7 +881,7 @@ Deno.serve(async (req) => {
           // Only count succeeded PIs tagged as LumaLine. A declined PI has amount set
           // but status !== 'succeeded' and must NOT inflate the Stripe total.
           if (pi.metadata?.source === "lumaline" && pi.status === "succeeded") {
-            // pi.amount is Stripe cents; 1 cent = 10,000 micro-USD.
+            // pi.amount is Stripe cents; 1 cent = 10,000 micro-EUR (all amounts are EUR, not USD).
             stripeTotalMicros += pi.amount * 10000;
             stripeCount++;
           }
@@ -1013,6 +1051,12 @@ Deno.serve(async (req) => {
   // run — no webhook handling is needed to close the loop. (Setting it as the
   // invoice_settings default is optional polish; first-attached already suffices.)
   if (req.method === "POST" && path.endsWith("/setup-link")) {
+    // aal2 parity with /charge and /refund: attaching a payment method to an
+    // advertiser's customer is a money-adjacent mutation, so a stolen aal1
+    // magic-link session (which still passes the top-level requireAdmin) must
+    // not reach it. Re-gate on requireMoneyAdmin (money_admins membership + aal2).
+    if (!(await requireMoneyAdmin(req))) return jsonErr("Forbidden", 403);
+
     let setupBody: Record<string, unknown> = {};
     try { setupBody = await req.json(); } catch { /* empty body ok */ }
 

@@ -27,6 +27,47 @@
 //     email/PII rides in any impression traffic.
 import { corsHeaders, json } from "../_shared/cors.ts";
 import { serviceRpc, forwardRpc, bearerHeader, SUPABASE_URL, ANON_KEY, SERVICE_ROLE_KEY } from "../_shared/jwt.ts";
+import { createMemoryLimiter } from "../_shared/ratelimit.mjs";
+import { resolveClientIp, saltedIpHash } from "../_shared/client-ip.mjs";
+import { validateDisputeDescription } from "../_shared/dispute-logic.mjs";
+
+// D1: per-isolate flood guard for the unauthenticated device-code endpoints. Login start/poll/refresh
+// are cheap but abusable (user-code brute force, refresh spraying). Raw IP kept only in this Map.
+const deviceLimit = createMemoryLimiter({ max: Number(Deno.env.get("LUMALINE_AUTH_RL_PER_MIN") ?? "30"), windowMs: 60000 });
+let authRlSaltWarned = false;
+// P1: deviceRateOk takes an ALREADY-RESOLVED trusted-source client IP (resolveClientIp, same
+// derivation as lumaline-feed) instead of reading the client-controllable leftmost XFF itself.
+function deviceRateOk(ip: string, bucket: string): boolean {
+  if (!ip) return true;
+  if (!Deno.env.get("LUMALINE_RL_SALT") && !authRlSaltWarned) {
+    authRlSaltWarned = true;
+    console.error("auth-device: LUMALINE_RL_SALT unset — relying on the per-isolate in-memory limiter only.");
+  }
+  return deviceLimit.hit(`${bucket}:${ip}`, Date.now());
+}
+
+// P3 SYBIL: durable device-creation throttle (service-role fixed-window counter in DB), layered on the
+// per-isolate deviceLimit which a distributed caller evades. Two scopes per /device/code: a GLOBAL
+// fleet ceiling and a per-trusted-IP ceiling. Env-overridable.
+const DEVCODE_GLOBAL_PER_MIN = Number(Deno.env.get("LUMALINE_DEVCODE_GLOBAL_PER_MIN") ?? "60");
+const DEVCODE_IP_PER_MIN     = Number(Deno.env.get("LUMALINE_DEVCODE_IP_PER_MIN") ?? "5");
+
+// Both throttle scopes must pass. Global always enforced; per-IP only when a salted hash is available.
+// The salted IP hash uses the SAME shared derivation (_shared/client-ip.mjs saltedIpHash) as
+// lumaline-feed.clientIpHash — single source; raw IP is discarded (data-minimization).
+async function deviceCreateThrottleOk(ip: string): Promise<boolean> {
+  try {
+    const g = await svc("signup_throttle_hit", { p_scope: "devcode_global", p_max: DEVCODE_GLOBAL_PER_MIN }) as unknown;
+    if (g === false) return false;
+    const salt = Deno.env.get("LUMALINE_RL_SALT");
+    const iph = salt ? await saltedIpHash(salt, ip) : null;
+    if (iph) {
+      const p = await svc("signup_throttle_hit", { p_scope: `devcode_ip:${iph}`, p_max: DEVCODE_IP_PER_MIN }) as unknown;
+      if (p === false) return false;
+    }
+    return true;
+  } catch { return true; }   // DB hiccup: the per-isolate deviceLimit floor still applied upstream
+}
 
 // Device access JWT TTL. Kept SHORT (15 min) because the client silently refreshes near expiry
 // (src/client/auth.mjs getValidAccessToken), so a short TTL costs nothing — and it bounds the
@@ -115,11 +156,16 @@ Deno.serve(async (req) => {
   }
 
   if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+  // Trusted-source client IP (same derivation as lumaline-feed). Feeds the per-isolate deviceRateOk
+  // AND the P3 durable per-trusted-IP device-creation throttle.
+  const { ip: clientIp } = await resolveClientIp(req.headers, Deno.env.get("LUMALINE_EDGE_PROOF") ?? "");
   let body: Json = {};
   try { body = await req.json(); } catch { /* empty ok */ }
 
   // ---- POST /device/code — start a device-authorization grant ----------------------
   if (path.endsWith("/device/code")) {
+    if (!deviceRateOk(clientIp, "code")) return json({ error: "rate limited" }, 429);
+    if (!(await deviceCreateThrottleOk(clientIp))) return json({ error: "rate limited" }, 429);
     const deviceCode = randB64url(32);
     const { display, normalized } = genUserCode();
     let started: Json | null;
@@ -144,6 +190,7 @@ Deno.serve(async (req) => {
 
   // ---- POST /device/token — poll; on approval, mint the device JWT -----------------
   if (path.endsWith("/device/token")) {
+    if (!deviceRateOk(clientIp, "token")) return json({ error: "rate limited" }, 429);
     const deviceCode = String(body.device_code ?? "");
     if (!deviceCode) return json({ error: "invalid_request" }, 400);
     // Generate the refresh token up front; redeem stores ONLY its hash, on the device row it
@@ -182,6 +229,7 @@ Deno.serve(async (req) => {
 
   // ---- POST /device/refresh — rotate the refresh token, re-mint the access JWT -----
   if (path.endsWith("/device/refresh")) {
+    if (!deviceRateOk(clientIp, "refresh")) return json({ error: "rate limited" }, 429);
     const refresh = String(body.refresh_token ?? "");
     if (!refresh) return json({ error: "invalid_grant" }, 400);
     const newRefresh = randB64url(32);
@@ -265,6 +313,12 @@ Deno.serve(async (req) => {
     const description  = String(body.description  ?? "").trim();
     if (!impressionId || !description) {
       return json({ error: "impression_id and description are required" }, 400);
+    }
+    // D2: bound size (storage abuse) + reject raw control bytes (terminal/log injection, NUL tricks).
+    // NOT the XSS fix — the admin dashboard MUST HTML-escape description on render.
+    const descReason = validateDisputeDescription(description);
+    if (descReason) {
+      return json({ error: `invalid description: ${descReason}` }, 400);
     }
 
     // Verify impression ownership via RLS — RLS policy 'impressions_select_own' scopes the

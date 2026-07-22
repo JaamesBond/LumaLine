@@ -55,9 +55,11 @@ import {
   errorCheck,
   evalBillingStalled,
   evalChargeFailed,
+  evalFleetVelocity,
   evalLedgerZeroSum,
   evalPayoutFailed,
   evalPayoutStuck,
+  evalPostpayChargebacks,
   evalReconDrift,
   evalReversedChargeUnrefunded,
   FAILURE_LOOKBACK_MS,
@@ -374,6 +376,26 @@ async function checkReversedChargeUnrefunded(): Promise<CheckResult> {
   return evalReversedChargeUnrefunded({ reviews, charges, now: Date.now() });
 }
 
+// Fleet-velocity (P3): aggregate anti-Sybil anomaly surface. READ-ONLY (STABLE RPC).
+async function checkFleetVelocity(): Promise<CheckResult> {
+  const r = await serviceRpc("monitor_fleet_velocity", {});
+  if (!r.ok) return errorCheck("fleet_velocity", `monitor_fleet_velocity HTTP ${r.status}`);
+  return evalFleetVelocity(r.data as Record<string, unknown>);
+}
+
+// postpay_chargeback (A9 visibility): wires the pass-1 evalPostpayChargebacks that shipped UNWIRED
+// (its runner was never added to monitor/index.ts). Rows from public.advertiser_postpay_chargebacks,
+// scoped to the last 24h by created_at. READ-ONLY.
+async function checkPostpayChargebacks(): Promise<CheckResult> {
+  const sinceIso = new Date(Date.now() - FAILURE_LOOKBACK_MS).toISOString();
+  const r = await svc("GET", "advertiser_postpay_chargebacks", {
+    query: `created_at=gte.${encodeURIComponent(sinceIso)}` +
+      "&select=dispute_id,advertiser_id,amount_micros,created_at&order=created_at.desc&limit=500",
+  });
+  if (!r.ok) return errorCheck("postpay_chargeback", `advertiser_postpay_chargebacks query HTTP ${r.status}`);
+  return evalPostpayChargebacks(r.data as Array<Record<string, unknown>>);
+}
+
 // ---------------------------------------------------------------------------
 // Email (Resend) — best-effort, never fails the run, never logs secret values.
 // ---------------------------------------------------------------------------
@@ -446,6 +468,8 @@ Deno.serve(async (req) => {
       ["billing_recon_drift", () => checkBillingReconDrift(fromDate, toDate)],
       ["payout_recon_drift", () => checkPayoutReconDrift(fromDate, toDate)],
       ["reversed_charge_unrefunded", checkReversedChargeUnrefunded],
+      ["postpay_chargeback", checkPostpayChargebacks],
+      ["fleet_velocity", checkFleetVelocity],
     ];
     const checks: CheckResult[] = [];
     for (const [name, run] of runners) {

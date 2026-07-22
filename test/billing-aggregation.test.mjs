@@ -36,9 +36,10 @@ test('microsToCents: whole-cent conversions', () => {
   assert.equal(microsToCents(1_100_000), 110); // Degen: 22 × 50000
   assert.equal(microsToCents(0), 0);
 });
-test('microsToCents: rounds at the half-cent', () => {
-  assert.equal(microsToCents(495_000), 50, '49.5 → 50');
+test('microsToCents: FLOORS at the half-cent (F4 — never round up / phantom overcharge)', () => {
+  assert.equal(microsToCents(495_000), 49, '49.5 floors to 49 (never round up — F4)');
   assert.equal(microsToCents(494_999), 49, '49.4999 → 49');
+  assert.equal(microsToCents(999_999), 99, '99.9999 floors to 99 (never round up — F4)');
   assert.equal(microsToCents(10_001), 1);
 });
 test('microsToCents: coerces numeric strings', () => {
@@ -129,7 +130,7 @@ test('below-minimum aggregate → skip_below_min (NON-terminal: no charge row wr
 
 test('exact 50-cent boundary + rounding decide charge vs skip', () => {
   assert.equal(planAdvertiserCharges([row({ amount_micros: 500_000 })])[0].action, 'charge', '50c → charge');
-  assert.equal(planAdvertiserCharges([row({ amount_micros: 495_000 })])[0].action, 'charge', '49.5c rounds to 50 → charge');
+  assert.equal(planAdvertiserCharges([row({ amount_micros: 495_000 })])[0].action, 'skip_below_min', '49.5c floors to 49 < 50 → skip (never overcharge to 50c — F4)');
   assert.equal(planAdvertiserCharges([row({ amount_micros: 494_999 })])[0].action, 'skip_below_min', '49.4999c → 49 → skip');
   assert.equal(planAdvertiserCharges([row({ amount_micros: 490_000 })])[0].action, 'skip_below_min', '49c → skip');
 });
