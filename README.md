@@ -78,6 +78,12 @@ lumaline install      # explicit, reversible — wires the statusLine into Claud
 lumaline uninstall    # restores your previous statusLine, byte-for-byte
 ```
 
+If your shell answers `lumaline: command not found`, your npm global bin directory isn't on
+`PATH`. `lumaline doctor` and `lumaline install` both detect this and print the exact one-line
+fix for your shell (bash/zsh/fish/PowerShell) — run them via
+`node "$(npm root -g)/lumaline/bin/lumaline.mjs" doctor`. The status line itself never depends
+on `PATH`: `install` writes absolute paths into `settings.json`.
+
 **Optional — log in so your views earn (opt-in, device-code):**
 
 ```bash

@@ -5,6 +5,7 @@ import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync } from
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CLAUDE_SETTINGS, LUMALINE_HOME, REFRESH_SECONDS } from './config.mjs';
+import { pathStatus, pathAdviceLines } from './lib/pathcheck.mjs';
 
 export function install() {
   const statuslinePath = fileURLToPath(new URL('./statusline.mjs', import.meta.url));
@@ -48,5 +49,11 @@ export function install() {
   console.log('  command        : ' + command);
   console.log('  refreshInterval: ' + REFRESH_SECONDS + 's');
   console.log('  full backup    : ' + fullBackup);
+
+  // The wiring above is PATH-independent by design (absolute node + script path). The
+  // commands we tell the user to type are not — so say so here, once, with the fix.
+  const advice = pathAdviceLines(pathStatus());
+  if (advice.length) console.warn('\n' + advice.join('\n'));
+
   console.log('\nUndo any time:  lumaline uninstall');
 }
