@@ -1,6 +1,6 @@
 # LumaLine Publisher Terms of Service
 
-**Last updated:** 2026-07-01 · **Effective:** 2026-07-01 · **Status:** **v1.1 in force** — all sections (§§1–15) approved by Aivora SRL; the **§7 Payouts and §8 Disputes payout additions were signed off 2026-07-01** (with the M3 payout rails). Real-money payouts remain gated on the production go-live milestone — Stripe operates in **TEST mode** until then (see §4).
+**Last updated:** 2026-07-23 · **Effective:** upon owner merge · **Status:** **v1.2** — replaces v1.1 (2026-07-01); sign-off act = owner merge of the PR containing this change. v1.2 changes: production billing and payouts are **live** (the v1.1 test-mode notices are removed), and §7.7 payout coverage is extended beyond the EEA to the **US, UK, Canada, and Switzerland**.
 
 These Terms govern your participation as a **publisher** in LumaLine — the
 `lumaline` tool that shows a clearly-labeled, signed, sponsored line in the
@@ -66,11 +66,10 @@ traffic are made by us, reasonably and in good faith.
 
 This section is important — please read it carefully.
 
-- **Earnings accrue now; real payouts are not yet live.** As you serve verified
-  views (and, where supported, clicks), earnings **accrue** to your ledger. The
-  payout rails described in §7 are currently exercised in **Stripe test mode**;
-  **real money payouts do not begin until the production "go-live" milestone.**
-  Until go-live, any balance you see is **informational only**.
+- **Earnings accrue as you serve; payouts are live.** As you serve verified
+  views (and, where supported, clicks), earnings **accrue** to your ledger and,
+  once cleared and past the hold (§6–§7), are **paid out for real** through the
+  payout rails described in §7.
 - **Accrual is not a guarantee of payment.** An accrued or "provisional" balance
   is not money owed until it has cleared (see §6), the hold in §7 has elapsed, and
   payouts are live, and is always subject to clawback for invalid traffic, error
@@ -110,9 +109,7 @@ split.
 ## 7. Payouts
 
 Payouts move your cleared, held 60% share from your LumaLine ledger to your own
-bank account. They are operated through our payment processor and are currently
-exercised in **Stripe test mode** (no real money moves until production go-live;
-see §4).
+bank account. They are operated through our payment processor, **Stripe**.
 
 - **7.1 Payout method (Stripe Connect).** Payouts are made via **Stripe Connect
   (Express)**. Before you can be paid you must complete Stripe's onboarding from
@@ -142,18 +139,22 @@ see §4).
   **offset** the clawed-back amount against your future earnings, or, where that
   is not possible, **request repayment**. Advertiser refunds do not by themselves
   reduce a correct publisher payout; only a clawback of *your* traffic does.
-- **7.7 Supported countries.** LumaLine operates from the European Union, so
-  payouts are currently available to publishers in the **European Economic Area
-  (EEA)** (the EU member states plus Iceland, Liechtenstein, and Norway), subject
-  to Stripe Connect support for your country and your account not being subject to
-  sanctions. If your country is unsupported your account is marked payout-ineligible
-  with a reason; earnings continue to accrue and can be paid if support later
-  becomes available.
-- **7.8 Currency, fees, and failed transfers.** Payouts are denominated in
-  **euros (EUR)**. Currency conversion and any processor fees are handled by
-  Stripe and may apply. If a transfer fails or is returned (for example, a
-  closed bank account), the amount is **restored to your balance** for a later
-  retry once you correct the issue.
+- **7.7 Supported countries.** Payouts are available to publishers in the
+  **European Economic Area (EEA)** (the EU member states plus Iceland,
+  Liechtenstein, and Norway) and, via Stripe cross-border payouts, the
+  **United States, United Kingdom, Canada, and Switzerland** — subject to
+  Stripe Connect support for your country and your account not being subject to
+  sanctions. Other countries (for example Australia) are not yet supported. If
+  your country is unsupported your account is marked payout-ineligible with a
+  reason; earnings continue to accrue and can be paid if support later becomes
+  available.
+- **7.8 Currency, fees, and failed transfers.** Your ledger and payouts are
+  denominated in **euros (EUR)**. If your bank account is in a non-euro country
+  (for example the US, UK, Canada, or Switzerland), Stripe converts the payout
+  to your local currency at its prevailing rate; currency conversion and any
+  processor fees are handled by Stripe and may apply. If a transfer fails or is
+  returned (for example, a closed bank account), the amount is **restored to
+  your balance** for a later retry once you correct the issue.
 
 ## 8. Disputes
 

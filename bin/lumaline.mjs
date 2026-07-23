@@ -131,7 +131,7 @@ Usage:
   lumaline logout       Log out: revoke this device, revert to the anonymous sentinel
   lumaline earnings     Show your accrued earnings (transparent ledger)
   lumaline connect      Connect your bank (Stripe) to receive automatic weekly payouts
-                        (pass --country=XX if your location can't be detected; EEA only)
+                        (pass --country=XX if your location can't be detected; EEA/US/UK/CA/CH)
   lumaline doctor       Show environment + where Claude Code config lives
   lumaline version      Print version
 

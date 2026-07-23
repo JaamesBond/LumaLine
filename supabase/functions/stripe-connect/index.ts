@@ -44,6 +44,7 @@ import {
   payoutMinMicros,
   findTransferIdByMetadata,   // A13
   resolveOnboardCountry,
+  PAYOUT_SUPPORTED_COUNTRIES,
 } from "../_shared/payout-logic.mjs";
 import { parseWebhookSecrets } from "../_shared/webhook-secrets.mjs";
 import { piIdOf } from "../_shared/advertiser-logic.mjs";   // A9: normalize dispute.payment_intent
@@ -67,18 +68,14 @@ function jsonErr(message: string, status: number, detail?: unknown): Response {
 // Payout currency. The platform (Aivora SRL) is a Romania/EUR Stripe entity, so LumaLine
 // operates in EUR end-to-end (ledger micros = EUR-micros, advertisers charged in EUR,
 // publishers paid in EUR) — no FX on the home leg. 1 EUR = 1,000,000 micros = 100 cents.
+// Cross-border recipients (US/GB/CA/CH) still receive an EUR-denominated transfer; Stripe
+// converts to the destination account's local currency at its posted rate (fees Stripe-side).
 const PAYOUT_CURRENCY = "eur";
 
-// Countries LumaLine pays out to: the EEA (SEPA reach for a RO/EUR platform). A RO platform
-// cannot pay e.g. US recipients via Connect, so the set is EU/EEA. Keep in sync with
-// publisher-tos §7. account.updated from any other country → ineligible_country.
-const SUPPORTED_COUNTRIES = new Set([
-  // EU-27
-  "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IE",
-  "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE",
-  // EEA (non-EU)
-  "IS", "LI", "NO",
-]);
+// Countries LumaLine pays out to — EEA + the Stripe cross-border regions (US/GB/CA/CH) reachable
+// from an EEA platform. Defined in _shared/payout-logic.mjs so node --test can pin the set.
+// account.updated from any other country → ineligible_country.
+const SUPPORTED_COUNTRIES = PAYOUT_SUPPORTED_COUNTRIES;
 
 // Public app URL for hosted-onboarding return/refresh redirects.
 const APP_URL = Deno.env.get("LUMALINE_APP_URL") ?? "http://localhost:3000";
@@ -314,7 +311,7 @@ Deno.serve(async (req) => {
         try { body = await req.json(); } catch { /* empty body ok */ }
         const country = resolveOnboardCountry(body.country, pub.country, req.headers.get("cf-ipcountry"));
         if (!country) {
-          return jsonErr("country_required — tell us where your bank is: `lumaline connect --country=XX` (2-letter code, EEA)", 422);
+          return jsonErr("country_required — tell us where your bank is: `lumaline connect --country=XX` (2-letter code — EEA, US, GB, CA, CH)", 422);
         }
         if (!SUPPORTED_COUNTRIES.has(country)) {
           await svc("PATCH", "publishers", { body: { payout_status: "ineligible_country", country }, query: `id=eq.${pub.id}`, prefer: "return=minimal" });

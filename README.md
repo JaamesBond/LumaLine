@@ -105,8 +105,9 @@ account/device IDs — never your email, code, or any content. See the
    of gross** on a double-entry ledger you can audit any time (`lumaline earnings`, or the
    [publisher dashboard](https://lumaline.dev/app)).
 2. **Connect a bank, once** — click **Connect bank** in the [dashboard](https://lumaline.dev/app),
-   or run `lumaline connect`. Both open Stripe's hosted onboarding. **Payouts are EUR, to EEA bank
-   accounts only** (more regions as Stripe coverage allows).
+   or run `lumaline connect`. Both open Stripe's hosted onboarding. **Payouts reach bank accounts
+   in the EEA, US, UK, Canada, and Switzerland** (EUR ledger; non-euro accounts receive
+   Stripe-converted local currency).
 3. **Get paid automatically** — a weekly payout run pays every verified balance of **€1 or more**.
    Earnings become payable after a **7-day hold** — deliberately longer than the 72h clawback
    window, so money that reaches your bank can never be clawed back.
@@ -237,7 +238,7 @@ docs/                   design, feasibility, GTM
 - ✅ **Live with real money:** the full trust loop runs in production — Ed25519-verified signed
   feed → server-verified dwell windows (HMAC heartbeat chain + anti-batch) → double-entry EUR
   ledger with 72h clawback + invalid-traffic scanning → real advertiser charges (Stripe) and
-  automatic weekly publisher payouts (Stripe Connect, EEA). The first real advertiser charge
+  automatic weekly publisher payouts (Stripe Connect — EEA, US, UK, CA, CH). The first real advertiser charge
   settled and reconciled in July 2026. Anonymous installs still serve the self-promo line,
   **`gross = 0`, never billed.**
 - ✅ **Self-serve dashboards:** publisher dashboard (earnings, bank connect) at

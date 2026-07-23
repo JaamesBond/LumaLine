@@ -305,7 +305,7 @@ export async function connect({
   }
   if (res.status === 422 && /country_required/.test(res.data?.error ?? '')) {
     out('We could not detect your country. Tell us where your bank is:');
-    out('  lumaline connect --country=XX   (2-letter code, e.g. DE, FR, RO — EEA only for now)');
+    out('  lumaline connect --country=XX   (2-letter code, e.g. DE, US, GB — EEA, US, UK, Canada, Switzerland)');
     return;
   }
   if (res.status === 422) { out(`Payouts aren't supported in your region yet${res.data?.error ? ': ' + res.data.error : ''}.`); return; }
