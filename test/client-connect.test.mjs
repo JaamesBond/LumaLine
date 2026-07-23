@@ -58,3 +58,26 @@ test('connect: not logged in (no/expired token) → prints "Not logged in", neve
   assert.match(lines.join('\n'), /Not logged in/);
   assert.equal(called, false, 'must not call fetch when not logged in');
 });
+
+test('connect: --country is uppercased and sent in the onboard body', async () => {
+  let onboardBody = null;
+  const fetchImpl = async (url, opts = {}) => {
+    if (url.endsWith('/connect/status')) return { ok: true, status: 200, json: async () => ({ ok: true, onboarded: false, payout_status: 'none' }) };
+    onboardBody = JSON.parse(opts.body ?? '{}');
+    return { ok: true, status: 200, json: async () => ({ ok: true, account_id: 'acct_1', onboarding_url: 'https://connect.stripe.com/setup/abc' }) };
+  };
+  const lines = [];
+  await connect({ file: tokenFile(), connectBase: 'https://x/stripe-connect', fetchImpl, out: (s) => lines.push(s), country: ' nl ' });
+  assert.deepEqual(onboardBody, { country: 'NL' });
+});
+
+test('connect: 422 country_required → prints the --country instruction, not the generic region message', async () => {
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/connect/status')) return { ok: true, status: 200, json: async () => ({ ok: true, onboarded: false, payout_status: 'none' }) };
+    return { ok: false, status: 422, json: async () => ({ error: 'country_required — tell us where your bank is' }) };
+  };
+  const lines = [];
+  await connect({ file: tokenFile(), connectBase: 'https://x/stripe-connect', fetchImpl, out: (s) => lines.push(s) });
+  assert.match(lines.join('\n'), /--country=XX/);
+  assert.ok(!lines.join('\n').includes("aren't supported"), 'country_required is a question, not a refusal');
+});

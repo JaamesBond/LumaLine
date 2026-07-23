@@ -77,3 +77,30 @@ test('falls back to full amount when amount_reversed is absent', () => {
   assert.equal(reversedMicrosFromTransfer({ amount: 3000 }), 3000 * 10000);
   assert.equal(reversedMicrosFromTransfer({}), 0);
 });
+
+// ---- resolveOnboardCountry (fix: NULL country must ask, never default to US) ------------
+test('resolveOnboardCountry: precedence is body > stored > header', async () => {
+  const { resolveOnboardCountry } = await import('../supabase/functions/_shared/payout-logic.mjs');
+  assert.equal(resolveOnboardCountry('NL', 'RO', 'DE'), 'NL');
+  assert.equal(resolveOnboardCountry(undefined, 'RO', 'DE'), 'RO');
+  assert.equal(resolveOnboardCountry(undefined, null, 'DE'), 'DE');
+});
+
+test('resolveOnboardCountry: normalizes case and whitespace', async () => {
+  const { resolveOnboardCountry } = await import('../supabase/functions/_shared/payout-logic.mjs');
+  assert.equal(resolveOnboardCountry(' nl ', null, null), 'NL');
+  assert.equal(resolveOnboardCountry(null, 'ro', null), 'RO');
+});
+
+test('resolveOnboardCountry: invalid entries are skipped, not fatal', async () => {
+  const { resolveOnboardCountry } = await import('../supabase/functions/_shared/payout-logic.mjs');
+  assert.equal(resolveOnboardCountry('USA', 'R1', 'FR'), 'FR');   // 3 letters / digit → skip
+  assert.equal(resolveOnboardCountry('', 42, 'be'), 'BE');        // empty / non-string → skip
+  assert.equal(resolveOnboardCountry({}, [], null), null);
+});
+
+test('resolveOnboardCountry: all unknown → null (ask the user; NEVER a default)', async () => {
+  const { resolveOnboardCountry } = await import('../supabase/functions/_shared/payout-logic.mjs');
+  assert.equal(resolveOnboardCountry(undefined, null, undefined), null);
+  assert.equal(resolveOnboardCountry(null, null, ''), null);
+});
