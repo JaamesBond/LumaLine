@@ -115,3 +115,23 @@ test('PAYOUT_SUPPORTED_COUNTRIES: EEA + US/GB/CA/CH, nothing else', async () => 
   }
   assert.equal(C.size, 34, 'EU-27 + IS/LI/NO + US/GB/CA/CH = 34');
 });
+
+// ---- canRedoOnboardCountry (mis-picked country before onboarding completes) -------------
+test('canRedoOnboardCountry: fresh un-onboarded account with a different explicit country → redo', async () => {
+  const { canRedoOnboardCountry } = await import('../supabase/functions/_shared/payout-logic.mjs');
+  assert.equal(canRedoOnboardCountry({ requested: 'NL', storedCountry: 'RO', detailsSubmitted: false, payoutsEnabled: false }), true);
+});
+
+test('canRedoOnboardCountry: NEVER after details submitted or payouts enabled', async () => {
+  const { canRedoOnboardCountry } = await import('../supabase/functions/_shared/payout-logic.mjs');
+  assert.equal(canRedoOnboardCountry({ requested: 'NL', storedCountry: 'RO', detailsSubmitted: true, payoutsEnabled: false }), false);
+  assert.equal(canRedoOnboardCountry({ requested: 'NL', storedCountry: 'RO', detailsSubmitted: false, payoutsEnabled: true }), false);
+});
+
+test('canRedoOnboardCountry: same country, missing, or malformed request → no redo', async () => {
+  const { canRedoOnboardCountry } = await import('../supabase/functions/_shared/payout-logic.mjs');
+  assert.equal(canRedoOnboardCountry({ requested: 'RO', storedCountry: 'RO', detailsSubmitted: false, payoutsEnabled: false }), false);
+  assert.equal(canRedoOnboardCountry({ requested: undefined, storedCountry: 'RO', detailsSubmitted: false, payoutsEnabled: false }), false);
+  assert.equal(canRedoOnboardCountry({ requested: 'NLD', storedCountry: 'RO', detailsSubmitted: false, payoutsEnabled: false }), false);
+  assert.equal(canRedoOnboardCountry({}), false);
+});

@@ -142,3 +142,19 @@ export const PAYOUT_SUPPORTED_COUNTRIES = new Set([
   // Stripe cross-border regions reachable from an EEA platform
   'US', 'GB', 'CA', 'CH',
 ]);
+
+/**
+ * May a mis-picked onboarding country be redone? Only when the caller EXPLICITLY requests a
+ * different valid country AND Stripe onboarding was never completed (no details submitted, no
+ * payouts enabled). Stripe fixes the country at account creation, so "redo" means delete the
+ * un-onboarded account and create a fresh one — never allowed once the person has actually
+ * submitted details or the account can move money.
+ * @param {{requested: unknown, storedCountry: unknown, detailsSubmitted: unknown, payoutsEnabled: unknown}} p
+ * @returns {boolean}
+ */
+export function canRedoOnboardCountry({ requested, storedCountry, detailsSubmitted, payoutsEnabled } = {}) {
+  if (typeof requested !== 'string' || !/^[A-Z]{2}$/.test(requested)) return false;
+  if (requested === storedCountry) return false;
+  if (detailsSubmitted === true || payoutsEnabled === true) return false;
+  return true;
+}
