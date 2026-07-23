@@ -60,7 +60,13 @@ async function main() {
 async function doctor() {
   const cfg = await import('../src/config.mjs');
   const crypto = await import('node:crypto');
+  const { pathStatus, pathAdviceLines } = await import('../src/lib/pathcheck.mjs');
+  const p = pathStatus();
   console.log('node            : ' + process.version + ' (' + process.platform + '/' + process.arch + ')');
+  console.log('lumaline on PATH: ' + (p.ok ? p.found + ' ✓'
+    : p.shadowed ? p.found + ' ⚠ (a different install shadows this one)'
+    : p.ephemeral ? 'no — ran from a temporary npx cache'
+    : 'NO' + (p.dir ? ' — shim is in ' + p.dir : '')));
   console.log('claude settings : ' + cfg.CLAUDE_SETTINGS + (existsSync(cfg.CLAUDE_SETTINGS) ? ' ✓' : ' (missing — is Claude Code installed?)'));
   console.log('lumaline home   : ' + cfg.LUMALINE_HOME);
   console.log('feed            : ' + cfg.FEED_BASE);
@@ -102,6 +108,9 @@ async function doctor() {
       console.log('current statusLine: ' + JSON.stringify(s.statusLine ?? null));
     } catch { /* ignore */ }
   }
+  const advice = pathAdviceLines(p);
+  if (advice.length) console.log('\n' + advice.join('\n'));
+
   console.log("\nwhat's next     : `lumaline install` wires the signed line into Claude Code (reversible); `lumaline uninstall` restores your prior statusLine.");
 }
 
