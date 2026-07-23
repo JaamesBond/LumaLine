@@ -44,6 +44,7 @@ import {
   payoutMinMicros,
   findTransferIdByMetadata,   // A13
   resolveOnboardCountry,
+  canRedoOnboardCountry,
   PAYOUT_SUPPORTED_COUNTRIES,
 } from "../_shared/payout-logic.mjs";
 import { parseWebhookSecrets } from "../_shared/webhook-secrets.mjs";
@@ -302,14 +303,47 @@ Deno.serve(async (req) => {
     try { stripe = getStripe(); } catch (err) { return jsonErr((err as { message?: string }).message ?? "Stripe not configured", 503); }
 
     try {
+      let body: Record<string, unknown> = {};
+      try { body = await req.json(); } catch { /* empty body ok */ }
+      const requested = typeof body.country === "string" ? body.country.trim().toUpperCase() : null;
+
       let acctId = pub.stripe_account_id;
+      let storedCountry = pub.country;
+
+      // Country redo: an EXPLICIT different country on an account whose onboarding was never
+      // completed deletes the mis-created account and falls through to fresh creation (Stripe
+      // fixes country at creation — recreate is the only way to change it). An account with
+      // submitted details or enabled payouts is NEVER touched: past that point, country changes
+      // are a support operation, not a self-serve one.
+      if (acctId && requested && requested !== storedCountry) {
+        const acct = await stripe.accounts.retrieve(acctId);
+        if (canRedoOnboardCountry({
+          requested,
+          storedCountry,
+          detailsSubmitted: acct.details_submitted === true,
+          payoutsEnabled: acct.payouts_enabled === true,
+        })) {
+          await stripe.accounts.del(acctId);
+          await svc("PATCH", "publishers", {
+            body: { stripe_account_id: null, payout_status: "none", country: null },
+            query: `id=eq.${pub.id}`,
+            prefer: "return=minimal",
+          });
+          acctId = null;
+          storedCountry = null;
+        } else {
+          return jsonErr(
+            `Your Stripe account is already set up in ${storedCountry ?? "its country"} and onboarding has progressed too far to change it self-serve — contact support`,
+            409,
+          );
+        }
+      }
+
       if (!acctId) {
         // Country resolution: explicit caller choice → stored value → CDN geo header. Never a
         // hardcoded default — Stripe fixes the country at account creation. Unknown ≠ ineligible:
         // asking for the country must not stamp payout_status (only a KNOWN unsupported one does).
-        let body: Record<string, unknown> = {};
-        try { body = await req.json(); } catch { /* empty body ok */ }
-        const country = resolveOnboardCountry(body.country, pub.country, req.headers.get("cf-ipcountry"));
+        const country = resolveOnboardCountry(requested, storedCountry, req.headers.get("cf-ipcountry"));
         if (!country) {
           return jsonErr("country_required — tell us where your bank is: `lumaline connect --country=XX` (2-letter code — EEA, US, GB, CA, CH)", 422);
         }
