@@ -104,3 +104,23 @@ export async function findTransferIdByMetadata(listFn, { destination, payoutId, 
     startingAfter = data[data.length - 1].id;
   }
 }
+
+/**
+ * Resolve the country for Express-account creation: explicit request choice → stored publisher
+ * country → CDN geo header (cf-ipcountry). Returns a valid ISO-3166-1 alpha-2 code or null.
+ * NEVER defaults to a country: Stripe fixes the country at account creation, so a guessed value
+ * permanently mis-creates the account (the old `?? "US"` fallback locked out every publisher
+ * whose row had country NULL — which was all of them, since nothing ever set the column).
+ * @param {unknown} bodyCountry   country the caller explicitly passed in the request body
+ * @param {unknown} storedCountry publishers.country from the DB
+ * @param {unknown} headerCountry cf-ipcountry request header (absent when not proxied)
+ * @returns {string|null}
+ */
+export function resolveOnboardCountry(bodyCountry, storedCountry, headerCountry) {
+  for (const c of [bodyCountry, storedCountry, headerCountry]) {
+    if (typeof c !== 'string') continue;
+    const up = c.trim().toUpperCase();
+    if (/^[A-Z]{2}$/.test(up)) return up;
+  }
+  return null;
+}

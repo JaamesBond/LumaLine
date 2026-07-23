@@ -43,6 +43,7 @@ import {
   constantTimeEqual,
   payoutMinMicros,
   findTransferIdByMetadata,   // A13
+  resolveOnboardCountry,
 } from "../_shared/payout-logic.mjs";
 import { parseWebhookSecrets } from "../_shared/webhook-secrets.mjs";
 import { piIdOf } from "../_shared/advertiser-logic.mjs";   // A9: normalize dispute.payment_intent
@@ -303,15 +304,22 @@ Deno.serve(async (req) => {
     let stripe: Stripe;
     try { stripe = getStripe(); } catch (err) { return jsonErr((err as { message?: string }).message ?? "Stripe not configured", 503); }
 
-    const country = pub.country ?? "US";
-    if (!SUPPORTED_COUNTRIES.has(country)) {
-      await svc("PATCH", "publishers", { body: { payout_status: "ineligible_country" }, query: `id=eq.${pub.id}`, prefer: "return=minimal" });
-      return jsonErr(`Payouts are not yet supported in ${country}`, 422);
-    }
-
     try {
       let acctId = pub.stripe_account_id;
       if (!acctId) {
+        // Country resolution: explicit caller choice → stored value → CDN geo header. Never a
+        // hardcoded default — Stripe fixes the country at account creation. Unknown ≠ ineligible:
+        // asking for the country must not stamp payout_status (only a KNOWN unsupported one does).
+        let body: Record<string, unknown> = {};
+        try { body = await req.json(); } catch { /* empty body ok */ }
+        const country = resolveOnboardCountry(body.country, pub.country, req.headers.get("cf-ipcountry"));
+        if (!country) {
+          return jsonErr("country_required — tell us where your bank is: `lumaline connect --country=XX` (2-letter code, EEA)", 422);
+        }
+        if (!SUPPORTED_COUNTRIES.has(country)) {
+          await svc("PATCH", "publishers", { body: { payout_status: "ineligible_country", country }, query: `id=eq.${pub.id}`, prefer: "return=minimal" });
+          return jsonErr(`Payouts are not yet supported in ${country}`, 422);
+        }
         const account = await stripe.accounts.create({
           type: "express",
           country,
@@ -320,7 +328,7 @@ Deno.serve(async (req) => {
         });
         acctId = account.id;
         await svc("PATCH", "publishers", {
-          body: { stripe_account_id: acctId, payout_status: "pending" },
+          body: { stripe_account_id: acctId, payout_status: "pending", country },
           query: `id=eq.${pub.id}`,
           prefer: "return=minimal",
         });

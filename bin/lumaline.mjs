@@ -39,9 +39,16 @@ async function main() {
     case 'earnings':
       await (await import('../src/client/auth.mjs')).earnings();
       break;
-    case 'connect':
-      await (await import('../src/client/auth.mjs')).connect({});
+    case 'connect': {
+      // `lumaline connect [--country=XX | --country XX]` — country only matters on first onboard.
+      let country;
+      for (let i = 0; i < rest.length; i++) {
+        if (rest[i] === '--country') country = rest[i + 1];
+        else if (rest[i].startsWith('--country=')) country = rest[i].slice('--country='.length);
+      }
+      await (await import('../src/client/auth.mjs')).connect({ country });
       break;
+    }
     case 'doctor':
       await doctor();
       break;
@@ -124,6 +131,7 @@ Usage:
   lumaline logout       Log out: revoke this device, revert to the anonymous sentinel
   lumaline earnings     Show your accrued earnings (transparent ledger)
   lumaline connect      Connect your bank (Stripe) to receive automatic weekly payouts
+                        (pass --country=XX if your location can't be detected; EEA only)
   lumaline doctor       Show environment + where Claude Code config lives
   lumaline version      Print version
 

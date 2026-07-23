@@ -285,7 +285,7 @@ export async function earnings({
 // --- connect (self-serve bank onboarding) ----------------------------------------------
 export async function connect({
   file = DEVICE_TOKEN, connectBase = STRIPE_CONNECT_BASE, fetchImpl = fetch,
-  now = Date.now(), timeoutMs = FETCH_TIMEOUT_MS, out = console.log,
+  now = Date.now(), timeoutMs = FETCH_TIMEOUT_MS, out = console.log, country,
 } = {}) {
   const token = await getValidAccessToken({ file, authBase: AUTH_BASE, fetchImpl, now, timeoutMs });
   if (!token) { out('Not logged in. Run `lumaline login` first.'); return; }
@@ -297,9 +297,15 @@ export async function connect({
   }
   let res;
   try {
-    res = await postJson(fetchImpl, `${connectBase}/connect/onboard`, {}, { bearer: token, timeoutMs });
+    const body = country ? { country: String(country).trim().toUpperCase() } : {};
+    res = await postJson(fetchImpl, `${connectBase}/connect/onboard`, body, { bearer: token, timeoutMs });
   } catch {
     out('Could not start onboarding (network error). Try again in a moment.');
+    return;
+  }
+  if (res.status === 422 && /country_required/.test(res.data?.error ?? '')) {
+    out('We could not detect your country. Tell us where your bank is:');
+    out('  lumaline connect --country=XX   (2-letter code, e.g. DE, FR, RO — EEA only for now)');
     return;
   }
   if (res.status === 422) { out(`Payouts aren't supported in your region yet${res.data?.error ? ': ' + res.data.error : ''}.`); return; }
