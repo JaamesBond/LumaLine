@@ -10,8 +10,8 @@
 </p>
 
 <p align="center">
-  <a href="https://luma-line.lovable.app"><img src="https://img.shields.io/badge/website-luma--line-10B981?style=flat-square" alt="website" /></a>
-  <img src="https://img.shields.io/badge/status-public%20beta%20%C2%B7%20feed%20live-2DD4BF?style=flat-square" alt="status" />
+  <a href="https://lumaline.dev"><img src="https://img.shields.io/badge/website-lumaline.dev-10B981?style=flat-square" alt="website" /></a>
+  <img src="https://img.shields.io/badge/status-live%20%C2%B7%20earnings%20on-2DD4BF?style=flat-square" alt="status" />
   <img src="https://img.shields.io/badge/dependencies-0-10B981?style=flat-square" alt="zero deps" />
   <img src="https://img.shields.io/badge/node-%E2%89%A518-43853d?style=flat-square" alt="node >=18" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT" />
@@ -33,7 +33,7 @@ Claude Code's status bar during that wait — using **only** the official `statu
 No bundle patching. No silent updates. No security trade-offs.
 
 ```
-★ LumaLine — honest, signed ads for Claude Code  ·  https://luma-line.lovable.app  ·  sponsored (5s)
+★ LumaLine — honest, signed ads for Claude Code  ·  https://lumaline.dev  ·  sponsored (5s)
 ```
 
 > One labeled line, Ed25519-signed before it ever renders. The destination URL is shown **inline**
@@ -42,10 +42,10 @@ No bundle patching. No silent updates. No security trade-offs.
 > The line is colored the brand green by default. Hide the URL with `LUMALINE_SHOW_URL=0`, disable
 > color with `NO_COLOR=1` (or `LUMALINE_COLOR=off`), disable links with `LUMALINE_HYPERLINKS=0`.
 
-**Public beta is live now.** The signed feed currently serves LumaLine's own self-promo line so
-you can install it and watch the whole trust loop run for real. **Per-publisher *earnings* unlock
-at GA** (publisher login + payouts) — [join the founding-publisher waitlist](https://luma-line.lovable.app).
-We market what's true: *see it live today*, **not** *get paid today*.
+**LumaLine is live, with real money.** The signed feed serves real sponsored lines; logged-in
+publishers accrue **EUR earnings at a 60/40 publisher-favored split**, and payouts run
+automatically via Stripe — see [Getting paid](#-getting-paid). Anonymous installs see the
+self-promo line (never billed) so you can watch the whole trust loop run before opting in.
 
 ---
 
@@ -68,10 +68,10 @@ You never have to take our word for it — **the whole client is open-source and
 
 ## ▶️ Try it in 30 seconds
 
-**Install the beta from GitHub** (the client is zero-dependency; this pulls only LumaLine):
+**Install from npm** (the client is zero-dependency; this pulls only LumaLine):
 
 ```bash
-npm install -g github:JaamesBond/LumaLine
+npm install -g lumaline
 lumaline doctor       # shows the feed URL, the bundled key fingerprint, reachability, login state
 lumaline install      # explicit, reversible — wires the statusLine into Claude Code
 # … use Claude Code; the signed line appears during wait-time …
@@ -88,17 +88,28 @@ on `PATH`: `install` writes absolute paths into `settings.json`.
 
 ```bash
 lumaline login        # prints a code + URL; approve in the browser, and impressions attribute to you
-lumaline earnings     # transparent ledger: what you've accrued (USD)
+lumaline earnings     # transparent ledger: what you've accrued (EUR)
+lumaline connect      # connect your bank (Stripe) — required once before payouts can reach you
 lumaline logout       # revoke this device; revert to the anonymous (never-billed) line
 ```
 
 Login is opt-in and never automatic. Before it, the line runs **anonymously and is never
-billed**. After it, earnings **accrue** to your account — but real **payouts begin only at the
-production go-live**; until then balances are informational. A revoked or expired device falls
-back to the anonymous identity and accrues nothing. The only thing that ever leaves your machine
-on login is a short-lived token carrying just opaque account/device IDs — never your email, code,
-or any content. See the [Privacy Policy](docs/legal/privacy-policy.md) and
-[Publisher Terms](docs/legal/publisher-tos.md).
+billed**. A revoked or expired device falls back to the anonymous identity and accrues nothing.
+The only thing that ever leaves your machine on login is a short-lived token carrying just opaque
+account/device IDs — never your email, code, or any content. See the
+[Privacy Policy](docs/legal/privacy-policy.md) and [Publisher Terms](docs/legal/publisher-tos.md).
+
+### 💶 Getting paid
+
+1. **Log in** — `lumaline login`. From then on your verified views accrue **EUR earnings at 60%
+   of gross** on a double-entry ledger you can audit any time (`lumaline earnings`, or the
+   [publisher dashboard](https://lumaline.dev/app)).
+2. **Connect a bank, once** — click **Connect bank** in the [dashboard](https://lumaline.dev/app),
+   or run `lumaline connect`. Both open Stripe's hosted onboarding. **Payouts are EUR, to EEA bank
+   accounts only** (more regions as Stripe coverage allows).
+3. **Get paid automatically** — a weekly payout run pays every verified balance of **€1 or more**.
+   Earnings become payable after a **7-day hold** — deliberately longer than the 72h clawback
+   window, so money that reaches your bank can never be clawed back.
 
 `install` is the **only** thing that touches your Claude Code settings, and only when *you* run
 it — never automatically on `npm install`. It backs up `~/.claude/settings.json` first and
@@ -111,11 +122,11 @@ own signed feed + a fake Claude Code session):
 git clone https://github.com/JaamesBond/LumaLine.git && cd LumaLine
 npm run demo          # cinematic: looks like a real Claude Code session
 npm run demo:plumbing # bare tick loop → local audit log + a backend VERIFIED impression
-npm test              # 34 tests: crypto, dwell protocol, anti-fraud, click tracker
+npm test              # full node --test suite: crypto, dwell protocol, anti-fraud, money paths
 ```
 
 > Note: `demo` is an `npm` script (run from a clone), **not** a `lumaline` subcommand. The
-> installed CLI is `install · uninstall · login · logout · earnings · statusline · doctor · version`.
+> installed CLI is `install · uninstall · login · logout · earnings · connect · statusline · doctor · version`.
 
 ---
 
@@ -127,7 +138,7 @@ LumaLine wires a command into Claude Code's official
 1. **Sanctioned surface** — runs only as the official `statusLine` command. Nothing patched, nothing injected.
 2. **Signed content** — fetches the current ad and **verifies its Ed25519 signature** against the bundled public key. Anything unsigned or forged is refused; the client shows your plain status instead.
 3. **Honest billing** — opens a *server-verified* dwell window and posts a per-second heartbeat hash-chain that sequences the beats and is tamper-evident to third parties; the **server** measures the real dwell wall-clock and per-device velocity and records **one** impression only after a full dwell with activity — **never during idle**. (The chain sequences beats; the server-measured dwell + velocity/invalid-traffic caps, not the chain alone, are what gate crediting.)
-4. **Transparent ledger** — when earnings turn on at GA, revenue clears on a publisher-favored **60/40** double-entry ledger with a 72h clawback window and invalid-traffic scanning. (During the beta the self-promo line is **`gross = 0` — counted as a view, never billed.**)
+4. **Transparent ledger** — revenue clears on a publisher-favored **60/40** double-entry ledger with a 72h clawback window and invalid-traffic scanning. (The anonymous self-promo line is **`gross = 0` — counted as a view, never billed.**)
 
 `refreshInterval: 1` keeps the line live even through long idle, but **billable impressions only
 count when there's real activity**, so idle time never inflates anything.
@@ -170,25 +181,26 @@ open. Honesty means naming what that inevitably exposes to the feed server, and 
 - **You stay in control:** every event is mirrored locally to `~/.lumaline/audit.log`, links can be
   turned off (`LUMALINE_HYPERLINKS=0`), and `lumaline uninstall` stops the feed entirely.
 
-A full Terms / Privacy / ad policy lands with GA earnings. If a live per-second beacon isn't for
-you, that's a fair call — uninstall is one command.
+The Terms, Privacy Policy, and ad policy are in force and linked below. If a live per-second
+beacon isn't for you, that's a fair call — uninstall is one command.
 
 ---
 
-## 📣 Founding publishers & advertisers
+## 📣 Publishers & advertisers
 
-**Developers:** install the beta, watch the signed line run, and **join the founding-publisher
-waitlist**. When earnings turn on at GA, you'll keep **60% of gross** on an auditable ledger — and
-founding publishers go first. *(No earnings during the beta — the self-promo line is never billed.)*
+**Developers:** install it, log in, connect a bank — your Claude Code wait-time earns real EUR.
+See [Getting paid](#-getting-paid). You keep **60% of gross** on an auditable ledger.
 
 **Advertisers:** reach developers who block every other ad —
 
 - **100% viewability** — they're staring at the terminal waiting on the agent.
 - **Ad-blocker immune** — uBlock and Pi-hole can't touch a status line.
-- **OSC-8 clickable** — zero friction from terminal to browser.
-- Priced on **verified attention** (CPVA) + clicks (CPC), with clawback + invalid-traffic detection so you only pay for real attention.
+- Priced on **verified attention** (CPVA): you pay only after a server-verified dwell, with
+  clawback + invalid-traffic detection so you only pay for real attention. (Clickable CPC is
+  built but gated by an upstream terminal bug — see the status section below.)
 
-[**→ Join the waitlist (publisher or advertiser)**](https://luma-line.lovable.app)
+Advertiser self-serve (prepaid ad credit) is rolling out — email
+**patrascu.matei03@gmail.com** to get onboarded.
 
 ---
 
@@ -206,7 +218,7 @@ src/
   keys/public.pem       the bundled Ed25519 PUBLIC verify key (no private key ever ships)
 supabase/               live backend — Postgres + RLS + Edge Functions (lumaline-feed, click)
 poc/                    reference signed feed + demos (repo-only; never published to npm)
-test/                   node --test suite (34 tests)
+test/                   node --test suite
 docs/                   design, feasibility, GTM
 ```
 
@@ -216,22 +228,21 @@ docs/                   design, feasibility, GTM
 - [**Verification & economics design**](docs/superpowers/specs/2026-06-27-verification-and-economics-design.md) — the proof-of-dwell protocol, the honest threat model, and CPVA/CPC pricing.
 - [**Why this is honest**](docs/gtm/why-this-is-honest.md) — the one-page differentiator vs. invasive monetizers.
 - [**Privacy Policy**](docs/legal/privacy-policy.md) · [**Publisher Terms**](docs/legal/publisher-tos.md) — what login collects (UUID-only token, salted IP hash, nothing else) and the earnings-accrual-vs-payout timing. *(v1.0, in force.)*
-- [**Advertising Policy**](docs/legal/ad-policy.md) · [**Advertiser Terms**](docs/legal/advertiser-tos.md) — content standards, billing terms, clawback/refund policy, and the data-minimized impression model. *(v1.0 draft — in effect upon owner sign-off.)*
+- [**Advertising Policy**](docs/legal/ad-policy.md) · [**Advertiser Terms**](docs/legal/advertiser-tos.md) — content standards, the prepaid ad-credit billing model, clawback policy, and the data-minimized impression model. *(In force.)*
 
 ---
 
 ## ✅ Project status — honest version
 
-- ✅ **Live now (public beta):** the trust loop end-to-end against a hosted, signed feed — Ed25519
-  verify → server-verified dwell window (HMAC heartbeat chain + anti-batch) → recorded impression;
-  a reference signed backend; a revenue ledger with clearing/clawback/IVT scan; a 34-test suite.
-  The beta feed serves LumaLine's own self-promo line, **`gross = 0`, never billed.**
-- 🟡 **Built, gated on deploy (M1):** device-code `lumaline login` / `logout` / `earnings` —
-  installs can now attribute impressions to a real publisher via a short-lived, revocable device
-  token; earnings accrue (payouts still gated to the production go-live). Privacy Policy + Publisher
-  Terms are **approved and in force**; live once the login backend is deployed (migration + the
-  `auth-device` function + Resend email for `/activate`).
-- 🚧 **Before GA earnings:** real advertiser billing (Stripe test-mode charge + ledger reconciliation), Stripe Connect payouts, a branded feed domain, and an npm registry publish (`0.1.0`, superseding the `0.0.1` reservation stub). Ad Policy + Advertiser Terms are drafted (v1.0) and linked above.
+- ✅ **Live with real money:** the full trust loop runs in production — Ed25519-verified signed
+  feed → server-verified dwell windows (HMAC heartbeat chain + anti-batch) → double-entry EUR
+  ledger with 72h clawback + invalid-traffic scanning → real advertiser charges (Stripe) and
+  automatic weekly publisher payouts (Stripe Connect, EEA). The first real advertiser charge
+  settled and reconciled in July 2026. Anonymous installs still serve the self-promo line,
+  **`gross = 0`, never billed.**
+- ✅ **Self-serve dashboards:** publisher dashboard (earnings, bank connect) at
+  [lumaline.dev/app](https://lumaline.dev/app); advertiser portal (prepaid ad credit) rolling out
+  behind onboarding.
 - ⚠️ **Clickable links are terminal-dependent (open upstream bug):** the status-bar link is clickable
   in **IDE terminals** (VS Code/Cursor) but currently **not in standalone terminal emulators** (foot,
   kitty, Konsole, iTerm2, Alacritty) — an open Claude Code regression
@@ -248,7 +259,7 @@ docs/                   design, feasibility, GTM
     CPC scope to all terminals + note the fixed version here. If not, CPC stays IDE-terminals-only. Record
     the Claude Code version + pass/fail with each check.
 
-We'd rather under-promise here than oversell. [Track progress / get launch access →](https://luma-line.lovable.app)
+We'd rather under-promise here than oversell. [lumaline.dev →](https://lumaline.dev)
 
 ---
 
