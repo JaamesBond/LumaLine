@@ -124,3 +124,21 @@ export function resolveOnboardCountry(bodyCountry, storedCountry, headerCountry)
   }
   return null;
 }
+
+/**
+ * Countries LumaLine pays out to. Stripe cross-border payouts let an EEA platform transfer to
+ * connected accounts in the US, UK, Canada, and Switzerland in addition to the EEA itself
+ * (docs.stripe.com/connect/cross-border-payouts: "Platforms based in the United States, United
+ * Kingdom, EEA, Canada, and Switzerland can transfer funds to connected accounts located in any
+ * of these same regions"). Keep in sync with publisher-tos §7.7 and the README.
+ * Australia + rest-of-world need Stripe Global Payouts (not self-serve) — deliberately absent.
+ */
+export const PAYOUT_SUPPORTED_COUNTRIES = new Set([
+  // EU-27
+  'AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR', 'DE', 'GR', 'HU', 'IE',
+  'IT', 'LV', 'LT', 'LU', 'MT', 'NL', 'PL', 'PT', 'RO', 'SK', 'SI', 'ES', 'SE',
+  // EEA (non-EU)
+  'IS', 'LI', 'NO',
+  // Stripe cross-border regions reachable from an EEA platform
+  'US', 'GB', 'CA', 'CH',
+]);

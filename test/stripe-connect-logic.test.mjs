@@ -104,3 +104,14 @@ test('resolveOnboardCountry: all unknown → null (ask the user; NEVER a default
   assert.equal(resolveOnboardCountry(undefined, null, undefined), null);
   assert.equal(resolveOnboardCountry(null, null, ''), null);
 });
+
+test('PAYOUT_SUPPORTED_COUNTRIES: EEA + US/GB/CA/CH, nothing else', async () => {
+  const { PAYOUT_SUPPORTED_COUNTRIES: C } = await import('../supabase/functions/_shared/payout-logic.mjs');
+  for (const c of ['RO', 'DE', 'FR', 'IS', 'LI', 'NO', 'US', 'GB', 'CA', 'CH']) {
+    assert.ok(C.has(c), `${c} must be payable`);
+  }
+  for (const c of ['AU', 'JP', 'BR', 'IN', 'UK']) {   // 'UK' is not an ISO code — GB is
+    assert.ok(!C.has(c), `${c} must NOT be payable`);
+  }
+  assert.equal(C.size, 34, 'EU-27 + IS/LI/NO + US/GB/CA/CH = 34');
+});
