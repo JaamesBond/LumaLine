@@ -30,8 +30,9 @@
 --     90 days is therefore pure margin. (app.scan_selfdeal_risk is the longest reader of the
 --     impressions TABLE at 30 days, but it touches neither column.)
 --   * ad_windows.ip_hash — read by the window_open velocity caps (1-2 min), scan_ivt (3 min),
---     scan_click_ivt (10 min), fleet_velocity_monitor (1 hour) and the click_resolve self-click
---     gate (click-token lifetime). Longest is 1 hour, so 7 days clears it by ~168x.
+--     scan_click_ivt (10 min), fleet_velocity_monitor (1 hour), app.scan_publisher_sybil (24 hours)
+--     and the click_resolve self-click gate (click-token lifetime). Longest is 24 hours, so 7 days
+--     clears it by ~7x.
 -- And because only ip_hash is touched on ad_windows, the unbounded reserve reader and the 30-day
 -- self-deal scan see an unchanged row at every age.
 --

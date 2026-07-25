@@ -57,14 +57,16 @@ select coalesce(sum(w.reserve_micros), 0) as expected_reserved_micros
                     where i.window_id = w.window_id
                       and i.state in ('clawed_back', 'void'));
 
--- STEP 4 — only after STEPs 1-3 look right: schedule nightly at 03:41 UTC.
--- NOT 03:17 — that slot belongs to lumaline-selfdeal-scan (20260722070000), which reads and
--- updates ad_windows.reserve_micros; running the sweep on the same table in the same minute buys
--- nothing but lock contention. Explicit small caps, matching the shape of the manual STEP 2.
+-- STEP 4 — only after STEPs 1-3 look right: schedule nightly at 03:53 UTC.
+-- NOT 03:17 or 03:41 — those slots already belong to lumaline-selfdeal-scan (20260722070000,
+-- reads/updates ad_windows.reserve_micros) and lumaline-sybil-fleet-scan (20260722180000, reads
+-- ad_windows.ip_hash — the very column this sweep scrubs); running the sweep on the same table in
+-- the same minute as either buys nothing but lock contention. 03:53 avoids both occupied minutes.
+-- Explicit small caps, matching the shape of the manual STEP 2.
 do $$
 begin
   if exists (select 1 from pg_extension where extname = 'pg_cron') then
-    perform cron.schedule('lumaline-retention-sweep', '41 3 * * *',
+    perform cron.schedule('lumaline-retention-sweep', '53 3 * * *',
       $cron$ select app.retention_sweep(p_batch => 2000, p_max_batches => 10) $cron$);
   else
     raise warning 'pg_cron absent; run app.retention_sweep() nightly externally';
