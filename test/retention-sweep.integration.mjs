@@ -148,6 +148,39 @@ test('R4 — ad_windows past 7d deleted, inside 7d kept', { skip: SKIP }, () => 
   assert.equal(exists('ad_windows', 'window_id', f.fresh.winId), '1');
 });
 
+test('R5/R6/R7 — clicks scrubbed, risk_flags and auth codes purged, fresh rows kept', { skip: SKIP }, () => {
+  const f = seedFixtures();
+  const out = JSON.parse(psql(`select app.retention_sweep()::text`));
+
+  // R5 — click token scrubbed but the row (a financial record) survives; UNIQUE still satisfied.
+  assert.ok(out.clicks_scrubbed >= 1);
+  assert.equal(exists('clicks', 'id', f.old.clickId), '1');
+  assert.equal(col('clicks', 'id', f.old.clickId, 'click_token_hash'), `scrubbed-${f.old.clickId}`);
+  assert.match(col('clicks', 'id', f.fresh.clickId, 'click_token_hash'), /^tok-fresh-/);
+
+  // R6 — risk_flags.
+  assert.ok(out.risk_flags_deleted >= 1);
+  assert.equal(exists('risk_flags', 'id', f.old.flagId), '0');
+  assert.equal(exists('risk_flags', 'id', f.fresh.flagId), '1');
+
+  // R7 — device_auth_codes.
+  assert.ok(out.device_auth_codes_deleted >= 1);
+  assert.equal(exists('device_auth_codes', 'id', f.old.codeId), '0');
+  assert.equal(exists('device_auth_codes', 'id', f.fresh.codeId), '1');
+});
+
+test('R9 — a second sweep reports zero work (idempotent)', { skip: SKIP }, () => {
+  seedFixtures();
+  psql(`select app.retention_sweep()`);
+  const second = JSON.parse(psql(`select app.retention_sweep()::text`));
+
+  assert.equal(second.impressions_scrubbed, 0);
+  assert.equal(second.ad_windows_deleted, 0);
+  assert.equal(second.clicks_scrubbed, 0);
+  assert.equal(second.risk_flags_deleted, 0);
+  assert.equal(second.device_auth_codes_deleted, 0);
+});
+
 test('R10 — anon and authenticated cannot execute the sweep', { skip: SKIP }, () => {
   const sig = 'app.retention_sweep(boolean,integer,integer,interval,interval,interval,interval,interval)';
   assert.equal(psql(`select has_function_privilege('anon', '${sig}', 'EXECUTE')`), 'f');

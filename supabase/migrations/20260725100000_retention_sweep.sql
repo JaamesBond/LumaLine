@@ -87,6 +87,52 @@ begin
         exit when v_n = 0 or v_i >= p_max_batches;
       end loop;
     end;
+
+    -- clicks: click_token_hash is NOT NULL UNIQUE, so scrub to a per-row unique sentinel rather
+    -- than NULL. The row is a financial record and is preserved. The `not like 'scrubbed-%'`
+    -- predicate is what makes the sweep idempotent here.
+    declare v_n integer; v_i integer := 0;
+    begin
+      loop
+        update public.clicks set click_token_hash = 'scrubbed-' || id::text
+         where id in (select id from public.clicks
+                       where created_at < now() - p_click_age
+                         and click_token_hash not like 'scrubbed-%'
+                       limit p_batch);
+        get diagnostics v_n = row_count;
+        v_click := v_click + v_n;
+        v_i := v_i + 1;
+        exit when v_n = 0 or v_i >= p_max_batches;
+      end loop;
+    end;
+
+    declare v_n integer; v_i integer := 0;
+    begin
+      loop
+        delete from public.risk_flags
+         where id in (select id from public.risk_flags
+                       where created_at < now() - p_flag_age
+                       limit p_batch);
+        get diagnostics v_n = row_count;
+        v_flag := v_flag + v_n;
+        v_i := v_i + 1;
+        exit when v_n = 0 or v_i >= p_max_batches;
+      end loop;
+    end;
+
+    declare v_n integer; v_i integer := 0;
+    begin
+      loop
+        delete from public.device_auth_codes
+         where id in (select id from public.device_auth_codes
+                       where created_at < now() - p_authcode_age
+                       limit p_batch);
+        get diagnostics v_n = row_count;
+        v_code := v_code + v_n;
+        v_i := v_i + 1;
+        exit when v_n = 0 or v_i >= p_max_batches;
+      end loop;
+    end;
   end if;
 
   return jsonb_build_object(
