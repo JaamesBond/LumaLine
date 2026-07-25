@@ -118,6 +118,27 @@ test('R1b — dry run counts the backdated rows without mutating them', { skip: 
   assert.equal(exists('risk_flags', 'id', f.old.flagId), '1');
 });
 
+test('R2/R3/R8 — impressions past 90d are scrubbed, rows survive, inside 90d untouched', { skip: SKIP }, () => {
+  const f = seedFixtures();
+  const before = psql(`select coalesce(sum(amount_micros), 0) from public.ledger_entries`);
+
+  const out = JSON.parse(psql(`select app.retention_sweep()::text`));
+  assert.equal(out.dry_run, false);
+  assert.ok(out.impressions_scrubbed >= 1);
+
+  // R2 — scrubbed, but the ROW is still there (ledger anchor).
+  assert.equal(exists('impressions', 'id', f.old.imprId), '1');
+  assert.equal(col('impressions', 'id', f.old.imprId, 'ip_hash'), 'NULL');
+  assert.equal(col('impressions', 'id', f.old.imprId, 'asn'), 'NULL');
+
+  // R3 — inside the window, untouched.
+  assert.equal(col('impressions', 'id', f.fresh.imprId, 'ip_hash'), 'iphash-fresh');
+  assert.equal(col('impressions', 'id', f.fresh.imprId, 'asn'), 'AS64501');
+
+  // R8 — the ledger did not move and is still balanced.
+  assert.equal(psql(`select coalesce(sum(amount_micros), 0) from public.ledger_entries`), before);
+});
+
 test('R10 — anon and authenticated cannot execute the sweep', { skip: SKIP }, () => {
   const sig = 'app.retention_sweep(boolean,integer,integer,interval,interval,interval,interval,interval)';
   assert.equal(psql(`select has_function_privilege('anon', '${sig}', 'EXECUTE')`), 'f');

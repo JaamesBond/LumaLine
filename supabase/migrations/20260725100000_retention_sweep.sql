@@ -53,6 +53,23 @@ begin
       where created_at < now() - p_flag_age;
     select count(*) into v_code from public.device_auth_codes
       where created_at < now() - p_authcode_age;
+  else
+    -- impressions: NEVER delete the row (ledger anchor + deferred zero-sum trigger).
+    -- Scrub the network columns only. Batched so the first pass cannot lock the table.
+    declare v_n integer; v_i integer := 0;
+    begin
+      loop
+        update public.impressions set ip_hash = null, asn = null
+         where id in (select id from public.impressions
+                       where created_at < now() - p_ip_age
+                         and (ip_hash is not null or asn is not null)
+                       limit p_batch);
+        get diagnostics v_n = row_count;
+        v_impr := v_impr + v_n;
+        v_i := v_i + 1;
+        exit when v_n = 0 or v_i >= p_max_batches;
+      end loop;
+    end;
   end if;
 
   return jsonb_build_object(
