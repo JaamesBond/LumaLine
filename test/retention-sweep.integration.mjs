@@ -41,6 +41,58 @@ const PSQL_OK = psqlWorks();
 const SKIP = !PSQL_OK ? 'psql/local stack unavailable — SKIPPING' : false;
 if (SKIP) console.log(`[retention-sweep.integration] ${SKIP}`);
 
+// Ages straddle every boundary: 91d/89d (impressions, clicks, risk_flags),
+// 8d/6d (ad_windows), 25h/23h (device_auth_codes).
+function seedFixtures() {
+  const ids = {
+    pubId: randomUUID(), devId: randomUUID(), authId: randomUUID(),
+    old:   { imprId: randomUUID(), winId: randomUUID(), clickId: randomUUID(), flagId: randomUUID(), codeId: randomUUID() },
+    fresh: { imprId: randomUUID(), winId: randomUUID(), clickId: randomUUID(), flagId: randomUUID(), codeId: randomUUID() },
+  };
+  const tag = ids.pubId.slice(0, 8);
+
+  psql(`
+    insert into auth.users (instance_id, id, aud, role, email, encrypted_password,
+        email_confirmed_at, raw_app_meta_data, raw_user_meta_data, created_at, updated_at,
+        confirmation_token, recovery_token, email_change_token_new, email_change)
+      values ('00000000-0000-0000-0000-000000000000', '${ids.authId}', 'authenticated', 'authenticated',
+        'retention-${tag}@example.invalid', '', now(), '{"provider":"email","providers":["email"]}', '{}', now(), now(), '', '', '', '');
+
+    insert into public.publishers (id, auth_user_id, handle)
+    values ('${ids.pubId}', '${ids.authId}', 'ret_${tag}');
+
+    insert into public.devices (id, publisher_id, label)
+    values ('${ids.devId}', '${ids.pubId}', 'retention-fixture');
+
+    -- impressions: ip_hash + asn present on both sides of the 90d line.
+    insert into public.impressions (id, window_id, publisher_id, attention_seconds, gross_micros, state, ip_hash, asn, created_at)
+    values ('${ids.old.imprId}',   '${randomUUID()}', '${ids.pubId}', 5, 0, 'void', 'iphash-old',   'AS64500', now() - interval '91 days'),
+           ('${ids.fresh.imprId}', '${randomUUID()}', '${ids.pubId}', 5, 0, 'void', 'iphash-fresh', 'AS64501', now() - interval '89 days');
+
+    -- ad_windows: UNLOGGED hot table, straddling the 7d line.
+    insert into public.ad_windows (window_id, publisher_id, device_id, challenge, nonce, ip_hash, started_at, created_at)
+    values ('${ids.old.winId}',   '${ids.pubId}', '${ids.devId}', 'c', 'n', 'winhash-old',   now() - interval '8 days', now() - interval '8 days'),
+           ('${ids.fresh.winId}', '${ids.pubId}', '${ids.devId}', 'c', 'n', 'winhash-fresh', now() - interval '6 days', now() - interval '6 days');
+
+    insert into public.clicks (id, window_id, publisher_id, click_token_hash, gross_micros, state, created_at)
+    values ('${ids.old.clickId}',   '${randomUUID()}', '${ids.pubId}', 'tok-old-${tag}',   0, 'void', now() - interval '91 days'),
+           ('${ids.fresh.clickId}', '${randomUUID()}', '${ids.pubId}', 'tok-fresh-${tag}', 0, 'void', now() - interval '89 days');
+
+    insert into public.risk_flags (id, impression_id, reason, created_at)
+    values ('${ids.old.flagId}',   '${ids.old.imprId}',   'fixture', now() - interval '91 days'),
+           ('${ids.fresh.flagId}', '${ids.fresh.imprId}', 'fixture', now() - interval '89 days');
+
+    insert into public.device_auth_codes (id, device_code_hash, user_code, publisher_id, expires_at, created_at)
+    values ('${ids.old.codeId}',   'dch-old-${tag}',   'UC-OLD-${tag}',   '${ids.pubId}', now(), now() - interval '25 hours'),
+           ('${ids.fresh.codeId}', 'dch-fresh-${tag}', 'UC-FRESH-${tag}', '${ids.pubId}', now(), now() - interval '23 hours');
+  `);
+
+  return ids;
+}
+
+const exists = (table, key, id) => psql(`select count(*) from public.${table} where ${key} = '${id}'`);
+const col = (table, key, id, c) => psql(`select coalesce(${c}::text, 'NULL') from public.${table} where ${key} = '${id}'`);
+
 test('R1 — dry run returns the full count contract and mutates nothing', { skip: SKIP }, () => {
   const out = JSON.parse(psql(`select app.retention_sweep(p_dry_run => true)::text`));
   for (const k of ['dry_run', 'impressions_scrubbed', 'ad_windows_deleted',
@@ -48,6 +100,22 @@ test('R1 — dry run returns the full count contract and mutates nothing', { ski
     assert.ok(k in out, `missing result key ${k}`);
   }
   assert.equal(out.dry_run, true);
+});
+
+test('R1b — dry run counts the backdated rows without mutating them', { skip: SKIP }, () => {
+  const f = seedFixtures();
+  const out = JSON.parse(psql(`select app.retention_sweep(p_dry_run => true)::text`));
+
+  assert.ok(out.impressions_scrubbed >= 1, 'expected the 91d impression counted');
+  assert.ok(out.ad_windows_deleted   >= 1, 'expected the 8d window counted');
+  assert.ok(out.clicks_scrubbed      >= 1, 'expected the 91d click counted');
+  assert.ok(out.risk_flags_deleted   >= 1, 'expected the 91d risk_flag counted');
+  assert.ok(out.device_auth_codes_deleted >= 1, 'expected the 25h auth code counted');
+
+  // Nothing moved.
+  assert.equal(exists('ad_windows', 'window_id', f.old.winId), '1');
+  assert.equal(col('impressions', 'id', f.old.imprId, 'ip_hash'), 'iphash-old');
+  assert.equal(exists('risk_flags', 'id', f.old.flagId), '1');
 });
 
 test('R10 — anon and authenticated cannot execute the sweep', { skip: SKIP }, () => {
