@@ -1,7 +1,13 @@
 # LumaLine Advertiser Terms of Service
 
-**Last updated:** 2026-07-23 · **Effective:** upon owner merge · **Status:** v2.0 — replaces v1.0
-(2026-07-02); sign-off act = owner merge of the PR containing this change
+**Last updated:** 2026-07-25 · **Effective:** upon owner merge · **Status:** v2.1 — replaces v2.0
+(2026-07-23) and v1.0 (2026-07-02); sign-off act = owner merge of the PR containing this change
+
+> **v2.1 change (2026-07-25):** §3.1 and §9 previously stated that unused prepaid ad credit is
+> *forfeited when your account closes*. It now says forfeiture requires the advertiser's **explicit
+> election**, and that exercising the GDPR right to erasure does **not** by itself forfeit credit.
+> This aligns the Terms with the shipped behaviour and is **more favourable to the advertiser** than
+> v2.0 — nothing here newly takes anything from anyone.
 
 These Advertiser Terms of Service ("Advertiser Terms") govern your participation
 as an **advertiser** on LumaLine, operated by **Aivora SRL** (Romania)
@@ -73,10 +79,20 @@ Self-serve advertising on LumaLine is funded by **prepaid ad credit**:
 - **NON-REFUNDABLE, SPEND-ONLY:** Ad credit is **non-refundable,
   non-withdrawable, non-transferable, and not redeemable for cash**, in whole
   or in part. Deposited funds can be used **only** to pay for advertising
-  delivered through LumaLine. **You will not get deposited funds back**, and
-  unused credit is **forfeited when your account closes** (see §9), except
+  delivered through LumaLine. **You will not get deposited funds back**, except
   only: (a) where **we** made a billing error (see §5.4), or (b) where
   mandatory applicable law requires otherwise.
+- **Forfeiture requires your explicit instruction:** unused credit becomes ours
+  only when **you expressly elect to abandon it** — via the confirmed
+  "write off remaining credit" action in your dashboard, or in writing — or
+  where **we** terminate your account for breach (see §9). Until then it stays
+  recorded to your account as unspent credit. It is still non-refundable and
+  non-withdrawable; recording it is not a promise to pay it out.
+- **Erasing your personal data does not forfeit your credit:** exercising your
+  right to erasure under the GDPR (see the
+  [Privacy Policy](./privacy-policy.md)) removes personal data. It does **not**
+  by itself transfer your unused credit to us. We will not make the exercise of
+  a data-protection right conditional on giving up funds.
 - **Deliberate over-deposit is your risk:** deposit amounts are chosen by you;
   deposit only what you intend to spend.
 - **Chargebacks are a breach:** Because ad credit is contractually
@@ -250,11 +266,14 @@ These Terms are effective when you create an account, fund it, or submit a
 creative, and continue until terminated. Either party may terminate at any
 time:
 
-- **You:** by contacting us to close your account. Any outstanding cleared and
-  billable postpay charges remain payable. **Unused prepaid ad credit is
-  forfeited on account closure** — it is non-refundable and non-withdrawable
-  (§3.1), except where §5.4 (our billing error) or mandatory applicable law
-  requires otherwise.
+- **You:** by contacting us to close your account, or by deleting it from your
+  dashboard. Any outstanding cleared and billable postpay charges remain
+  payable. Unused prepaid ad credit remains **non-refundable and
+  non-withdrawable** (§3.1) and cannot be spent once your account is closed. It
+  becomes ours **only if you expressly elect to abandon it** at closure or in
+  writing; otherwise it stays recorded as unspent credit. Either way you will
+  not receive it back, except where §5.4 (our billing error) or mandatory
+  applicable law requires otherwise.
 - **Us:** we may suspend or terminate your account immediately if you breach
   these Terms or the Advertising Policy, or for legal, regulatory, or safety
   reasons. Where possible, we will provide notice and an opportunity to cure
