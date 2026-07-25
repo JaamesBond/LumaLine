@@ -17,6 +17,8 @@
 //   G6 — admin advertiser_gdpr_delete(uuid) works; a non-admin session is refused
 //   G7 — advertiser_data_export returns the caller's own campaigns/creatives/deposits; unmapped rejected
 //   G8 — the house advertiser is refused (house_advertiser)
+//   G9 — an advertiser holding unspent credit CAN be erased (Phase 2 deadlock regression)
+//   G10 — in-flight transactions (a pending charge) still block erasure (guard not over-removed)
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -167,21 +169,18 @@ test('G1: self-delete anonymizes own org, tombstones email, pauses serving, pres
   assert.ok(Number(psql(`select count(*) from public.advertiser_action_log where advertiser_id='${A.advId}' and action='gdpr_erase';`)) >= 1, 'erasure audited');
 });
 
-test('G2: refuses while money is in flight (balance>0, then a pending topup)', { skip: SKIP }, async () => {
+test('G2: a nonzero balance no longer blocks self-delete, but a pending topup still does', { skip: SKIP }, async () => {
+  // Phase 2 (20260726100000) removed the idle-balance gate — see G9 for the direct-function
+  // regression test. This test covers the same change through the self-delete RPC wrapper, and
+  // confirms the in-flight-transaction guard (topup_pending) is untouched.
   const A = seedAdvertiser({ balance: 5000000 });
-  let res = await rpc('advertiser_gdpr_self_delete', {}, A.jwt);
-  assert.equal(res.data.ok, false, 'refused while balance>0');
-  assert.equal(res.data.reason, 'balance_or_reserved_nonzero');
-  assert.equal(psql(`select (deleted_at is null) from public.advertisers where id='${A.advId}';`), 't', 'NOT anonymized');
-
-  // Clear the balance but add a pending topup → still refused.
-  psql(`update public.advertiser_balances set balance_micros=0 where advertiser_id='${A.advId}';`);
   psql(`insert into public.advertiser_topup_intents (checkout_session_id, advertiser_id, amount_micros, status)
         values ('sess_${A.advId.slice(0,8)}','${A.advId}',10000000,'pending');`);
-  res = await rpc('advertiser_gdpr_self_delete', {}, A.jwt);
-  assert.equal(res.data.reason, 'topup_pending', 'refused while a deposit is in flight');
+  let res = await rpc('advertiser_gdpr_self_delete', {}, A.jwt);
+  assert.equal(res.data.reason, 'topup_pending', 'refused while a deposit is in flight (balance notwithstanding)');
+  assert.equal(psql(`select (deleted_at is null) from public.advertisers where id='${A.advId}';`), 't', 'NOT anonymized');
 
-  // Resolve the topup → erasure now succeeds.
+  // Resolve the topup → erasure now succeeds, despite the balance still being nonzero.
   psql(`update public.advertiser_topup_intents set status='credited' where advertiser_id='${A.advId}';`);
   res = await rpc('advertiser_gdpr_self_delete', {}, A.jwt);
   assert.equal(res.data.ok, true, 'erasure succeeds once money settled');
@@ -243,4 +242,34 @@ test('G8: the house advertiser is refused (house_advertiser)', { skip: SKIP }, a
   const res = await rpc('advertiser_gdpr_delete', { p_advertiser_id: H.advId }, ADMIN_JWT);
   assert.equal(res.data.ok, false, 'house advertiser cannot be erased');
   assert.equal(res.data.reason, 'house_advertiser');
+});
+
+test('G9 — an advertiser holding unspent credit CAN be erased (deadlock regression)', { skip: SKIP }, () => {
+  // Regression for the Art. 17 deadlock: deposits are non-refundable and there is no withdrawal
+  // RPC, so gating erasure on balance_micros > 0 made erasure permanently unreachable for anyone
+  // holding credit. Personal-data erasure must never depend on an org's money settling.
+  const A = seedAdvertiser({ balance: 40000000 });
+
+  const out = JSON.parse(psql(`select app.advertiser_gdpr_erase('${A.advId}')::text`));
+  assert.equal(out.ok, true, `erase refused: ${JSON.stringify(out)}`);
+
+  // Personal data gone...
+  assert.match(psql(`select name from public.advertisers where id = '${A.advId}'`), /^deleted-/);
+  assert.ok(psql(`select deleted_at from public.advertisers where id = '${A.advId}'`).length > 0);
+
+  // ...and the money is untouched, left as an unrecognized liability. NOT silently taken.
+  assert.equal(psql(
+    `select balance_micros from public.advertiser_balances where advertiser_id = '${A.advId}'`), '40000000');
+});
+
+test('G10 — in-flight TRANSACTIONS still block erasure (guard not over-removed)', { skip: SKIP }, () => {
+  // Only the idle-balance gate was removed. A pending charge is an in-flight transaction that
+  // resolves on its own in days, and must still defer erasure.
+  const A = seedAdvertiser({ balance: 0 });
+  psql(`insert into public.advertiser_charges (entry_group_id, advertiser_id, amount_micros, amount_cents, status)
+        values (gen_random_uuid(), '${A.advId}', 1000000, 100, 'pending')`);
+
+  const out = JSON.parse(psql(`select app.advertiser_gdpr_erase('${A.advId}')::text`));
+  assert.equal(out.ok, false);
+  assert.equal(out.reason, 'charge_pending');
 });
