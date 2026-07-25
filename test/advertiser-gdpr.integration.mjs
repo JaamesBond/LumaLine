@@ -22,6 +22,7 @@
 //   G11 — an advertiser writes off its OWN residual credit; ledger stays zero-sum
 //   G12 — reserved credit cannot be written off (BACKED-reserve invariant)
 //   G13 — writeoff is self-scoped: it cannot touch another org
+//   G14 — deletion_disposition records why a balance was left behind; rejects spend_down
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -329,4 +330,17 @@ test('G13 — writeoff is self-scoped: it cannot touch another org', { skip: SKI
     `select balance_micros from public.advertiser_balances where advertiser_id = '${B.advId}'`), '9000000');
   assert.equal(psql(
     `select balance_micros from public.advertiser_balances where advertiser_id = '${A.advId}'`), '0');
+});
+
+test('G14 — disposition records why a balance was left behind, and rejects spend_down', { skip: SKIP }, () => {
+  const A = seedAdvertiser({ balance: 40000000 });
+
+  psql(`update public.advertisers set deletion_disposition = 'dormant' where id = '${A.advId}'`);
+  assert.equal(psql(
+    `select deletion_disposition from public.advertisers where id = '${A.advId}'`), 'dormant');
+
+  // spend_down is NOT accepted until Phase 3 ships the cron that honors it. psql() uses
+  // execFileSync, which throws on a nonzero exit, so a CHECK violation surfaces as a throw.
+  assert.throws(() => psql(
+    `update public.advertisers set deletion_disposition = 'spend_down' where id = '${A.advId}'`));
 });

@@ -193,3 +193,44 @@ comment on function public.advertiser_writeoff_credit is
   'ledger pair — NO cash moves, so platform_cash is never touched: the forfeited credit stays in '
   'the platform''s Stripe balance and is simply recognized as revenue. Never written to '
   'advertiser_balance_ledger, whose kind CHECK has no writeoff value. Audited to advertiser_action_log.';
+
+-- ---------------------------------------------------------------------------
+-- Task 3: public.advertisers.deletion_disposition — why a residual balance was left behind.
+--
+-- Removing the balance gate (above) and adding an opt-in writeoff (above) both leave a balance
+-- in one of two end states after erasure, and nothing on the row said which. This column records
+-- that provenance so a future reader can tell "deliberately written off" from "left dormant".
+--
+-- deletion_disposition — why a residual balance was left behind at erasure.
+--   'dormant'  — balance stays on the books, unspent and unrecognized (the default outcome)
+--   'writeoff' — the advertiser deliberately zeroed it via advertiser_writeoff_credit()
+-- 'spend_down' is intentionally ABSENT: it defers erasure until credit is exhausted, which needs
+-- the Phase 3 pending-deletion cron. Accepting a value nothing honors would be a silent broken
+-- promise about a user's money. Phase 3 extends this CHECK.
+--
+-- NOT a protected column: app.advertisers_protect_cols (20260716150000) guards only
+-- is_house / status / stripe_customer_id / billing_mode, so the erase path can set this.
+alter table public.advertisers
+  add column if not exists deletion_disposition text
+    check (deletion_disposition in ('dormant', 'writeoff'));
+
+comment on column public.advertisers.deletion_disposition is
+  'Why a residual prepaid balance was left behind at GDPR erasure: dormant (unspent, unrecognized '
+  'liability) or writeoff (deliberately zeroed by the advertiser). NULL when no erasure has run or '
+  'no balance remained. spend_down arrives in Phase 3 with the cron that honors it.';
+
+-- ---------------------------------------------------------------------------
+-- Migration-tail privilege assertion: guard against the anon-EXECUTE footgun that reached
+-- production in this repo once (LumaLine SECDEF grant hardening) — Supabase's default privileges
+-- auto-grant anon EXECUTE on newly created functions unless explicitly revoked.
+do $$
+declare
+  v_fn text;
+  v_fns text[] := array['public.advertiser_writeoff_credit()'];
+begin
+  foreach v_fn in array v_fns loop
+    if has_function_privilege('anon', v_fn, 'EXECUTE') then
+      raise exception 'anon retains EXECUTE on % — REVOKE ALL FROM PUBLIC, anon missing', v_fn;
+    end if;
+  end loop;
+end $$;
