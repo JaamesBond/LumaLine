@@ -294,6 +294,18 @@ test('G11 — an advertiser writes off its OWN residual credit, ledger stays zer
   assert.equal(psql(`select coalesce(sum(amount_micros), 0) from public.ledger_entries`), before);
   assert.equal(psql(
     `select count(*) from public.ledger_entries where entry_group_id = '${res.data.entry_group_id}'`), '2');
+
+  // No cash moves on a write-off: the account, not just the count, matters. The forfeited credit
+  // stays in the platform's Stripe balance and is recognized as revenue, not booked as cash leaving.
+  assert.equal(psql(
+    `select account from public.ledger_entries
+      where entry_group_id = '${res.data.entry_group_id}' and amount_micros = -40000000`), 'platform_revenue');
+  assert.equal(psql(
+    `select account from public.ledger_entries
+      where entry_group_id = '${res.data.entry_group_id}' and amount_micros = 40000000`), 'advertiser_funds');
+  assert.equal(psql(
+    `select count(*) from public.ledger_entries
+      where entry_group_id = '${res.data.entry_group_id}' and account = 'platform_cash'`), '0');
 });
 
 test('G12 — reserved credit cannot be written off', { skip: SKIP }, async () => {

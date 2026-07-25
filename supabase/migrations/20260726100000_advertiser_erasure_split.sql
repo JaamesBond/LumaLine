@@ -123,10 +123,12 @@ comment on function app.advertiser_gdpr_erase is
 -- counterpart: no argument (self-scoped via app.current_advertiser_id(), so it can never touch
 -- another org), refuses while reserved_micros > 0 (committed serve-window money is off limits —
 -- writing it off would break the BACKED-reserve invariant that reserved_micros ==
--- SUM(ad_windows.reserve_micros), 20260716170000), and mirrors the debit branch of
--- admin_advertiser_adjust_balance (20260716200000:501-572) exactly: FOR UPDATE row lock, then two
--- zero-sum ledger_entries legs (platform_cash / advertiser_funds) under one entry_group_id.
--- Booked to ledger_entries with event_type='advertiser_adjustment' — NOT to
+-- SUM(ad_windows.reserve_micros), 20260716170000), and reuses the FOR UPDATE row-lock shape of
+-- admin_advertiser_adjust_balance's debit branch (20260716200000:501-572) — but NOT its account:
+-- a write-off moves no cash (the forfeited prepaid credit stays in the platform's Stripe balance,
+-- unlike a real admin debit), so the offsetting leg is platform_revenue, not platform_cash. The
+-- liability is extinguished and the money becomes recognized revenue; the bank balance is
+-- unchanged. Booked to ledger_entries with event_type='advertiser_adjustment' — NOT to
 -- advertiser_balance_ledger, whose kind CHECK (20260716170000:119) has no 'writeoff' value.
 -- ---------------------------------------------------------------------------
 create or replace function public.advertiser_writeoff_credit()
@@ -163,10 +165,14 @@ begin
      set balance_micros = 0, updated_at = now()
    where advertiser_id = v_adv;
 
+  -- No cash moves here: the forfeited credit never leaves the platform's Stripe balance. The
+  -- liability is extinguished (advertiser_funds) and the same money is recognized as platform
+  -- revenue (platform_revenue) — the real-money-movement account used elsewhere in this ledger
+  -- is untouched: no leg against it at all.
   insert into public.ledger_entries
     (entry_group_id, event_type, account, amount_micros, state, source_type, source_id, advertiser_id)
   values
-    (v_group, 'advertiser_adjustment', 'platform_cash',    -v_bal, 'cleared', 'advertiser_adjustment', v_adv, v_adv),
+    (v_group, 'advertiser_adjustment', 'platform_revenue', -v_bal, 'cleared', 'advertiser_adjustment', v_adv, v_adv),
     (v_group, 'advertiser_adjustment', 'advertiser_funds',  v_bal, 'cleared', 'advertiser_adjustment', v_adv, v_adv);
 
   perform app.log_advertiser_action(v_adv, 'gdpr_writeoff', 'advertiser', v_adv,
@@ -183,6 +189,7 @@ comment on function public.advertiser_writeoff_credit is
   'Self-serve, opt-in write-off of the caller''s OWN residual prepaid credit to zero. No argument '
   '(target derived from app.current_advertiser_id()), so it cannot reach another org. Refuses '
   'while reserved_micros > 0 — committed serve-window money is off limits and writing it off '
-  'would break the BACKED-reserve invariant. Books the two zero-sum ledger legs used by '
-  'admin_advertiser_adjust_balance; never written to advertiser_balance_ledger, whose kind CHECK '
-  'has no writeoff value. Audited to advertiser_action_log.';
+  'would break the BACKED-reserve invariant. Books a zero-sum advertiser_funds/platform_revenue '
+  'ledger pair — NO cash moves, so platform_cash is never touched: the forfeited credit stays in '
+  'the platform''s Stripe balance and is simply recognized as revenue. Never written to '
+  'advertiser_balance_ledger, whose kind CHECK has no writeoff value. Audited to advertiser_action_log.';
