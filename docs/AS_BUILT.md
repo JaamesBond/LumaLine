@@ -1,18 +1,19 @@
 # LumaLine — AS-BUILT Reconciliation & Deferral Ledger
 
 **Status:** Authoritative map of what *is built* vs. what the older design docs *describe*.
-**As of:** 2026-07-05. **M0–M4 DONE + merged.** **M5 (test→live money cutover) effectively LIVE** —
-first real advertiser charge **€1.10 settled + reconciled 2026-07-04** (§5d); auto-payout rails
-merged. **M6 (ops/observability/transparency) largely merged** (§5e). **M7 (self-serve dashboards)**
-in progress — the **publisher portal is built + e2e-verified, not yet committed/deployed** (§5f).
-**Branch (current):** `feat/m7-publisher-portal` (M7 backend, uncommitted). `main` HEAD `369bd47`
-(PR #32 auto-payout). Earlier: M4 `feat/m4-cpc-and-branded-url`, M0 `feat/m0-production-rails`.
+**As of:** 2026-07-25. **M0–M9 DONE + merged + DEPLOYED.** First real advertiser charge **€1.10
+settled + reconciled 2026-07-04** (§5d). All three self-serve dashboards **live on lumaline.dev**
+(M7 publisher `/app`, M8 admin, M9 advertiser — §5f); **advertiser deposits LIVE 2026-07-23**
+(prepaid non-refundable ad credit, ToS v2.0 in force). Security-audit hardening **deployed
+2026-07-22** (§5g). Payouts reach **34 countries** (EEA + US/GB/CA/CH, §5h). Client `lumaline@0.1.7`
+= npm latest. **Open:** first REAL publisher payout (§5h note on RO law), issue #45 (integration
+suite vs the concurrent-open cap).
 **Backend project:** Supabase `prmsonskzrubqsazmpwd` (the LumaLine project — **not** the unrelated CRM `kvlfpwzmjxuapjheknnj`).
 
-> **Security-audit hardening (2026-07-22, branch `fix/security-audit-hardening`, working tree only):**
+> **Security-audit hardening (2026-07-22, PR #39 — MERGED + DEPLOYED):**
 > a two-pass internal adversarial audit closed a set of farming / DoS / self-click / Sybil / chargeback
-> residuals on the LIVE surface — see **§5g** and deferral **D13–D15**. **NOT yet committed/deployed**
-> (owner-gated). No client change; wire-compatible.
+> residuals on the LIVE surface — see **§5g** and deferral **D13–D15**. All 20 migrations applied to
+> prod + 7 edge fns redeployed 2026-07-22. No client change; wire-compatible.
 
 > Read **this** doc and the **code** for what *is*. Read `docs/` for what's *planned*. Where the two
 > disagree, the two entries called out under **§3 Superseded** are the known traps — older docs
@@ -509,7 +510,13 @@ validation.
   clearing/clawback path; unblock only after M5 charge/payout validated).
 - **M6-T4 — advertiser API keys: DEFERRED** (avoid a new prod migration during money validation).
 
-## 5f. M7 as-built deltas (self-serve dashboards — PUBLISHER portal built, NOT deployed)
+## 5f. M7–M9 as-built deltas (self-serve dashboards — ALL THREE MERGED + DEPLOYED)
+
+> **Outcome (2026-07-18→21):** M7 publisher portal (PR #33), M8 owner/admin dashboard (PR #34,
+> aal2 `money_admins` tier), M9 advertiser portal (PR #35, prepaid ad-credit + DB-as-boundary RLS)
+> all merged to `main` and deployed; dashboards live on lumaline.dev 2026-07-21. **Advertiser
+> deposits went LIVE 2026-07-23** (webhook + secret wired, ToS v2.0 in force, kill-switch lifted).
+> The section below is the M7 design record as written pre-merge.
 
 **M7 = go-wide self-serve dashboards** (publisher → owner → advertiser). Three sub-projects, each its
 own brainstorm→spec→plan→build. Plan: `~/.claude/plans/look-at-m7-and-harmonic-wreath.md`. Scope doc:
@@ -554,7 +561,7 @@ CPVA-only were chosen for the later advertiser portal.
   identity `advertiser_users` + RLS isolation, prepay balance, re-scoped `admin-booking` RPCs, CPVA-only,
   guard rails against house/sentinel — largest, most review).
 
-## 5g. Security-audit hardening (branch `fix/security-audit-hardening` — working tree, NOT committed/deployed)
+## 5g. Security-audit hardening (PR #39 — MERGED + DEPLOYED 2026-07-22)
 
 A two-pass internal adversarial audit of the LIVE money + farming surface. **Working-tree only** — no
 commit, no deploy; owner-gated to ship. Discipline held throughout: **one coherent recreate per
@@ -678,6 +685,39 @@ IDE terminals, upstream #26356; CPVA/views is the dependable model everywhere).
   monitor `ivt:click:*` volume. Document the same-IP-void policy in the publisher terms / transparency report.
 - Build a lightweight admin view over open `publisher_payout_holds` (`sybil:shared_ip` / `selfdeal:shared_email`)
   + `advertiser_postpay_chargebacks` so the review queue is actioned.
+
+## 5h. Post-M9 deltas (2026-07-22→25: deposits live, legal v2, payout countries, 0.1.7)
+
+- **Advertiser deposits LIVE (2026-07-23).** Found + closed a live hazard: the deposit checkout
+  worked with the live Stripe key while `ADVERTISER_STRIPE_WEBHOOK_SECRET` was unset — money could
+  be captured with the credit never landing. Fixed: kill-switch (`ADVERTISER_MAX_DEPOSIT_MICROS=0`)
+  while **Advertiser ToS v2.0** (PR #42: prepaid **non-refundable** spend-only credit, **B2B-only**
+  eligibility, VAT section, deposit-chargeback = breach) was merged in force; Stripe webhook
+  endpoint created + secret set (digest-verified); kill-switch lifted (max €5000).
+- **Publisher ToS v1.2** (PR #46): stale test-mode notices removed; §7.7 payout countries extended.
+- **Payout reach: 34 countries** — EEA + **US/GB/CA/CH** via Stripe cross-border (PR #46;
+  the old "RO platform cannot pay US" comment was wrong per Stripe docs). Country handling
+  rebuilt: nothing ever set `publishers.country`, and onboard defaulted NULL→"US" → **bank
+  connect had been broken for 100% of publishers** (PR #44: resolve body→stored→`cf-ipcountry`,
+  never default, `country_required` 422 without stamping); mis-picked country **redoable until
+  Stripe verification** (PR #48: delete+recreate un-onboarded accounts, 409 past that);
+  dashboard country picker (marketing repo PRs #1/#2). `stripe-connect` fn at **v24**.
+  **Rest-of-world (AU, IN, BR…) is NOT reachable self-serve** from an EEA platform — Stripe
+  Global Payouts is sales-gated; Wise Platform is the researched complement (see memory
+  `payout-provider-research`).
+- **Client `0.1.7`** (PR #47): README truth-pass + "Getting paid" section (PR #43), `lumaline
+  connect --country=XX`. README + CLI commit to a **€1 payout minimum** — the prod
+  `LUMALINE_PAYOUT_MIN_MICROS` secret must be `1000000` to match (temporarily `500000` during the
+  first-payout exercise).
+- **First REAL publisher payout: still pending.** Blocked on recipient-side KYC: Stripe RO offers
+  **no "individual" business type** (Romanian law — recurring income needs a PFA/ÎI/SRL), so the
+  RO friend-publisher (~€0.90 payable) cannot onboard as a person; owner onboarded an NL account
+  2026-07-24 (verification unconfirmed). Rails themselves proven test-mode end-to-end (M3).
+- **Known-broken:** `test/serving.integration.mjs` fails on a clean local stack on `main`
+  (per-device concurrent-open cap from §5g; CI blind — integration suites self-skip). Issue #45.
+- **Docs housekeeping (2026-07-25):** deleted dead one-shot docs (`BLOCKED.md`, `RUN_LOG.md`,
+  `LAUNCH_RUN_PROMPT.md`, `REVIEW_TODO.md` — the one live nit became issue #49); `ops/HANDOFF.md`
+  reduced to a pointer; onboarding runbooks + `CLAUDE.md` + `MILESTONE_STATUS.md` refreshed.
 
 ## 6. Deferral ledger
 
