@@ -139,6 +139,15 @@ test('R2/R3/R8 — impressions past 90d are scrubbed, rows survive, inside 90d u
   assert.equal(psql(`select coalesce(sum(amount_micros), 0) from public.ledger_entries`), before);
 });
 
+test('R4 — ad_windows past 7d deleted, inside 7d kept', { skip: SKIP }, () => {
+  const f = seedFixtures();
+  const out = JSON.parse(psql(`select app.retention_sweep()::text`));
+
+  assert.ok(out.ad_windows_deleted >= 1);
+  assert.equal(exists('ad_windows', 'window_id', f.old.winId), '0');
+  assert.equal(exists('ad_windows', 'window_id', f.fresh.winId), '1');
+});
+
 test('R10 — anon and authenticated cannot execute the sweep', { skip: SKIP }, () => {
   const sig = 'app.retention_sweep(boolean,integer,integer,interval,interval,interval,interval,interval)';
   assert.equal(psql(`select has_function_privilege('anon', '${sig}', 'EXECUTE')`), 'f');

@@ -70,6 +70,23 @@ begin
         exit when v_n = 0 or v_i >= p_max_batches;
       end loop;
     end;
+
+    -- ad_windows: UNLOGGED hot table, never purged before this migration. Windows older than
+    -- p_window_age are long closed (the stale-window sweep runs at 10 minutes) and their only
+    -- consumers (scan_ivt, the velocity caps) look back <= 24h.
+    declare v_n integer; v_i integer := 0;
+    begin
+      loop
+        delete from public.ad_windows
+         where window_id in (select window_id from public.ad_windows
+                              where started_at < now() - p_window_age
+                              limit p_batch);
+        get diagnostics v_n = row_count;
+        v_win := v_win + v_n;
+        v_i := v_i + 1;
+        exit when v_n = 0 or v_i >= p_max_batches;
+      end loop;
+    end;
   end if;
 
   return jsonb_build_object(
