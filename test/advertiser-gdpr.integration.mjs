@@ -23,6 +23,9 @@
 //   G12 — reserved credit cannot be written off (BACKED-reserve invariant)
 //   G13 — writeoff is self-scoped: it cannot touch another org
 //   G14 — deletion_disposition records why a balance was left behind; rejects spend_down
+//   G15 — erasure is TERMINAL: an erased advertiser cannot resume serving — the self-serve status
+//         RPCs refuse, and window_open refuses even when the rows are forced back to active
+//   G16 — admin_ledger_health()'s cleared-accrual identity survives an opt-in credit write-off
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -81,6 +84,7 @@ const ADMIN_JWT = mintJwt(ADMIN.authId);
 const ORPHAN_JWT = mintJwt(randomUUID());   // a valid session mapped to no advertiser
 
 const advIds = [];
+const pubIds = [];
 const authIds = [ADMIN.authId];
 
 function seedUser(id, email) {
@@ -119,11 +123,77 @@ function seedAdvertiser({ isHouse = false, balance = 0, reserved = 0, stripeCust
   return { advId, campId, liId, crId, ownerAuth, email, jwt: mintJwt(ownerAuth) };
 }
 
+// ---------------------------------------------------------------------------
+// G15 serving helpers. window_open needs a DEVICE session (publisher_id + device_id claims), not
+// the advertiser session the rest of this file uses. Mirrors advertiser-serving.integration.mjs.
+// ---------------------------------------------------------------------------
+function mintDeviceJwt({ sub, publisher_id, device_id }) {
+  return mintJwt(sub, { publisher_id, device_id });
+}
+
+// A publisher + device + backing auth user, returning a device JWT. Deliberately a DIFFERENT auth
+// user from any advertiser member, so window_open's self-deal exclusion never applies.
+function seedPublisher() {
+  const authId = randomUUID(), pubId = randomUUID(), deviceId = randomUUID();
+  seedUser(authId, `gdpr-pub-${pubId.slice(0, 8)}@example.com`);
+  psql(`insert into public.publishers (id, auth_user_id, handle, status) values ('${pubId}','${authId}','gdpr-${pubId.slice(0,8)}','active');`);
+  psql(`insert into public.devices (id, publisher_id) values ('${deviceId}','${pubId}');`);
+  pubIds.push(pubId);
+  authIds.push(authId);
+  return { authId, pubId, deviceId, jwt: mintDeviceJwt({ sub: authId, publisher_id: pubId, device_id: deviceId }) };
+}
+
+// Make a seeded line dominate the weighted rotation and carry a line text unique to this test.
+function makeDominant(liId, crId) {
+  const line = `gdpr-serve-${crId.slice(0, 12)}`;
+  psql(`update public.line_items set weight = 1000000, targeting = '{}',
+          start_at = now() - interval '1 hour', end_at = now() + interval '30 days' where id = '${liId}';`);
+  psql(`update public.creatives set line = '${line}' where id = '${crId}';`);
+  return line;
+}
+
+// Collect the lines window_open serves over n opens, spreading them across fresh devices so the
+// in-DB velocity caps (6 concurrent open windows / device) are never the reason we stop seeing a
+// line. Returns [] entries for a house/no-fill tick.
+async function servedLines(n) {
+  const out = [];
+  for (let i = 0; i < n; i += 5) {
+    const pub = seedPublisher();
+    for (let k = 0; k < Math.min(5, n - i); k++) {
+      const w = await rpc('window_open', { p_activity_snapshot: 'session' }, pub.jwt);
+      if (!w.ok) throw new Error(`window_open failed: ${w.status} ${JSON.stringify(w.data)}`);
+      out.push(w.data?.ad?.line ?? null);
+    }
+  }
+  return out;
+}
+
+// Pull an advertiser's creatives/line_items out of the global rotation ASAP — a weight-1e6 line
+// would otherwise starve every other suite running in parallel against this same database.
+function stopServing(advId) {
+  try {
+    psql(`set session_replication_role = replica;
+      delete from public.creatives where line_item_id in (select id from public.line_items where campaign_id in (select id from public.campaigns where advertiser_id='${advId}'));
+      delete from public.line_items where campaign_id in (select id from public.campaigns where advertiser_id='${advId}');
+      reset session_replication_role;`);
+  } catch { /* best-effort */ }
+}
+
 function teardown() {
   try {
     const parts = [`set session_replication_role = replica;`];
+    const pubs = pubIds.map((x) => `'${x}'`).join(',');
+    if (pubs) {
+      parts.push(`delete from public.impressions where publisher_id in (${pubs});`);
+      parts.push(`delete from public.ad_windows where publisher_id in (${pubs});`);
+      parts.push(`delete from public.serve_counters where publisher_id in (${pubs});`);
+      parts.push(`delete from public.ledger_entries where publisher_id in (${pubs});`);
+      parts.push(`delete from public.devices where publisher_id in (${pubs});`);
+      parts.push(`delete from public.publishers where id in (${pubs});`);
+    }
     const advs = advIds.map((x) => `'${x}'`).join(',');
     if (advs) {
+      parts.push(`delete from public.line_item_daily_stats where line_item_id in (select li.id from public.line_items li join public.campaigns c on c.id=li.campaign_id where c.advertiser_id in (${advs}));`);
       parts.push(`delete from public.advertiser_balance_ledger where advertiser_id in (${advs});`);
       parts.push(`delete from public.ledger_entries where advertiser_id in (${advs});`);
       parts.push(`delete from public.advertiser_action_log where advertiser_id in (${advs});`);
@@ -343,4 +413,117 @@ test('G14 — disposition records why a balance was left behind, and rejects spe
   // execFileSync, which throws on a nonzero exit, so a CHECK violation surfaces as a throw.
   assert.throws(() => psql(
     `update public.advertisers set deletion_disposition = 'spend_down' where id = '${A.advId}'`));
+});
+
+test('G15 — erasure is TERMINAL: an erased advertiser can neither be re-activated nor served', { skip: SKIP }, async () => {
+  // app.advertiser_gdpr_erase pauses campaigns/line_items but deliberately leaves
+  // advertisers.status = 'active' (a protected column) and KEEPS the advertiser_users mappings, so
+  // app.current_advertiser_id() still resolves for an erased org. Without a deleted_at check a
+  // still-mapped member could flip everything back to active and spend the residual credit.
+  // 20260726110000 closes it at BOTH layers; this test proves both, and proves the preconditions
+  // are live rather than asserting on an inert fixture.
+  const A = seedAdvertiser({ balance: 100000000 });
+  const lineA = makeDominant(A.liId, A.crId);
+  let B = null;
+  try {
+    // --- PRECONDITION 1: this advertiser really does serve today. ---
+    const before = await servedLines(10);
+    assert.ok(before.includes(lineA),
+      `precondition failed: the fixture never served before erasure (saw ${JSON.stringify(before)})`);
+
+    // --- PRECONDITION 2: the self-serve status RPCs really are reachable for this caller. ---
+    let r = await rpc('advertiser_set_line_item_status', { p_id: A.liId, p_target: 'paused' }, A.jwt);
+    assert.ok(r.ok, `precondition failed: pause refused pre-erasure: ${JSON.stringify(r.data)}`);
+    r = await rpc('advertiser_set_line_item_status', { p_id: A.liId, p_target: 'active' }, A.jwt);
+    assert.ok(r.ok, `precondition failed: resume refused pre-erasure: ${JSON.stringify(r.data)}`);
+
+    // --- ERASE ---
+    const erased = await rpc('advertiser_gdpr_self_delete', {}, A.jwt);
+    assert.equal(erased.data.ok, true, `erase failed: ${JSON.stringify(erased.data)}`);
+    assert.equal(psql(`select status from public.line_items where id='${A.liId}';`), 'paused');
+    assert.equal(psql(`select status from public.campaigns where id='${A.campId}';`), 'paused');
+
+    // (a) the self-serve RPCs refuse re-activation. Both raise (errcode 55000), the refusal shape
+    // these functions already use for the A9 dispute hold, carrying account_deleted.
+    for (const [fn, id] of [['advertiser_set_line_item_status', A.liId], ['advertiser_set_campaign_status', A.campId]]) {
+      const res = await rpc(fn, { p_id: id, p_target: 'active' }, A.jwt);
+      assert.ok(!res.ok && res.status >= 400, `${fn} must refuse an erased advertiser, got ${res.status}`);
+      assert.match(JSON.stringify(res.data ?? {}), /account_deleted/, `${fn} must refuse with account_deleted`);
+    }
+    assert.equal(psql(`select status from public.line_items where id='${A.liId}';`), 'paused', 'still paused after the refused resume');
+    assert.equal(psql(`select status from public.campaigns where id='${A.campId}';`), 'paused');
+
+    // (b) the STRUCTURAL half: force the rows back to active behind the RPCs' back (exactly what a
+    // compromised/creative path would do) and prove window_open still refuses. deleted_at must be
+    // the ONLY thing excluding it — the advertiser row itself is still status='active'.
+    psql(`update public.line_items set status='active' where id='${A.liId}';
+          update public.campaigns  set status='active' where id='${A.campId}';`);
+    assert.equal(psql(`select status||'|'||(deleted_at is not null) from public.advertisers where id='${A.advId}';`),
+      'active|true', 'advertisers.status stays active after erasure — deleted_at is the only serve-gate');
+
+    // Control: a NON-erased twin proves the serving machinery is alive during the same opens, so
+    // "A never served" cannot be an artifact of an empty pool or a dead publisher fixture.
+    B = seedAdvertiser({ balance: 100000000 });
+    const lineB = makeDominant(B.liId, B.crId);
+
+    // Windows already opened against A during the pre-erasure precondition are expected; what must
+    // not move is the count AFTER erasure.
+    const winsAgainstA = () => psql(`select count(*) from public.ad_windows w join public.line_items li on li.id=w.line_item_id
+                                      where li.campaign_id='${A.campId}';`);
+    const winsBefore = winsAgainstA();
+    assert.ok(Number(winsBefore) > 0, 'precondition: A really did open windows while it was alive');
+
+    const after = await servedLines(10);
+    assert.ok(after.includes(lineB), `control failed: the non-erased twin never served (saw ${JSON.stringify(after)})`);
+    assert.ok(!after.includes(lineA), 'an ERASED advertiser must never serve, even with campaign + line_item forced active');
+    assert.equal(winsAgainstA(), winsBefore, 'not one further window was opened against the erased org');
+  } finally {
+    stopServing(A.advId);
+    if (B) stopServing(B.advId);
+  }
+});
+
+test('G16 — the cleared-accrual identity survives an opt-in credit write-off', { skip: SKIP }, async () => {
+  // admin_ledger_health() checks advertiser_billing = publisher_earnings + platform_revenue over
+  // CLEARED ACCRUALS. advertiser_writeoff_credit() books a cleared platform_revenue leg with
+  // event_type='advertiser_adjustment'; the other two legs of the identity were already filtered
+  // to the accrual event types, so an unfiltered third leg makes accrual_identity_ok permanently
+  // false — ledger corruption, as far as the owner dashboard can tell. 20260726110000 filters it.
+  const WRITEOFF = 7000000000;      // €7000 — orders of magnitude above any concurrent fixture,
+                                    // so the delta assertion below cannot be masked by other suites
+  const P = seedPublisher();
+  const W = seedAdvertiser({ balance: WRITEOFF });
+
+  // A REAL cleared accrual, so the identity is asserted over a NON-EMPTY fixture (a green
+  // accrual_identity_ok on an empty ledger would prove nothing). One statement = one txn, so the
+  // deferred zero-sum trigger sees the balanced group.
+  const grp = randomUUID(), imp = randomUUID();
+  psql(`insert into public.ledger_entries (entry_group_id, event_type, account, amount_micros, state, source_type, source_id, publisher_id, advertiser_id) values
+      ('${grp}','cpva_accrual','advertiser_billing', 1000000,'cleared','impression','${imp}', null,          '${W.advId}'),
+      ('${grp}','cpva_accrual','publisher_earnings', -600000,'cleared','impression','${imp}','${P.pubId}',   '${W.advId}'),
+      ('${grp}','cpva_accrual','platform_revenue',   -400000,'cleared','impression','${imp}', null,          '${W.advId}');`);
+
+  const before = await rpc('admin_ledger_health', {}, ADMIN_JWT);
+  assert.ok(before.ok, `health read failed: ${before.status} ${JSON.stringify(before.data)}`);
+  assert.ok(Number(before.data.cleared_advertiser_billing_micros) >= 1000000,
+    'precondition: the accrual identity must be over a non-empty cleared fixture');
+  assert.equal(before.data.accrual_identity_ok, true, 'precondition: the identity holds before the write-off');
+  const platBefore = Number(before.data.cleared_platform_revenue_micros);
+
+  const wo = await rpc('advertiser_writeoff_credit', {}, W.jwt);
+  assert.equal(wo.data.ok, true, `write-off failed: ${JSON.stringify(wo.data)}`);
+  assert.equal(String(wo.data.written_off_micros), String(WRITEOFF));
+
+  // Precondition for the FIX itself: the write-off really does book a CLEARED platform_revenue
+  // leg. Without this the assertions below would pass on a no-op write-off.
+  assert.equal(psql(`select count(*) from public.ledger_entries
+      where entry_group_id='${wo.data.entry_group_id}' and account='platform_revenue' and state='cleared';`), '1',
+    'precondition: the write-off books a cleared platform_revenue leg (the contaminating event)');
+
+  const after = await rpc('admin_ledger_health', {}, ADMIN_JWT);
+  assert.equal(after.data.accrual_identity_ok, true,
+    'the cleared-accrual identity must survive a write-off (unfiltered platform_revenue breaks it)');
+  assert.equal(after.data.zero_sum_ok, true, 'zero-sum is unaffected either way');
+  assert.ok(Number(after.data.cleared_platform_revenue_micros) - platBefore < WRITEOFF,
+    'the write-off must NOT be counted into cleared accrual platform_revenue');
 });

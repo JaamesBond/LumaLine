@@ -241,9 +241,9 @@ As an advertiser you must not:
   information (including claiming business status while acting as a consumer);
 - use LumaLine to promote content or products in violation of applicable law.
 
-Violations may result in campaign suspension, account termination, forfeiture
-of any outstanding ad credit (§3.1, §9), and/or referral to relevant
-authorities.
+Violations may result in campaign suspension, account termination, and — where
+we terminate your account for breach — forfeiture of any outstanding ad credit
+(§3.1, §9), and/or referral to relevant authorities.
 
 ---
 
@@ -277,8 +277,12 @@ time:
 - **Us:** we may suspend or terminate your account immediately if you breach
   these Terms or the Advertising Policy, or for legal, regulatory, or safety
   reasons. Where possible, we will provide notice and an opportunity to cure
-  before termination for policy violations. §3.1 applies to any remaining
-  ad credit.
+  before termination for policy violations. Any remaining ad credit is governed
+  by §3.1: it is forfeited to us only where we terminate your account **for
+  your breach**. If we terminate for legal, regulatory, or safety reasons that
+  are not your breach, your unused credit is **not** forfeited — it stays
+  recorded as unspent credit unless you expressly elect to abandon it, while
+  remaining non-refundable and non-withdrawable under §3.1.
 
 Termination does not affect accrued payment obligations.
 

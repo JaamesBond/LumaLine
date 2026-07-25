@@ -16,10 +16,13 @@
 -- uncharged_postpay_billings. Those are in-flight TRANSACTIONS, not idle credit — they resolve on
 -- their own within days and erasing mid-transaction would strand money in an unreconcilable state.
 --
--- The residual balance is left ON THE BOOKS as an unspent liability. It is NOT swept to the
--- platform: recognizing forfeited prepaid credit as revenue is "breakage", which needs a stated
--- accounting policy and EU VAT analysis that do not exist. Task 2 adds an explicit, opt-in
--- writeoff for an advertiser who wants to zero it deliberately.
+-- By DEFAULT the residual balance is left ON THE BOOKS as an unspent liability: erasure never
+-- sweeps it, because taking a user's money as a side effect of a data-protection request is
+-- exactly the coupling this migration exists to remove. Task 2 (below) adds the OPT-IN
+-- counterpart — advertiser_writeoff_credit() — which the advertiser must invoke deliberately, and
+-- which DOES recognize the forfeited credit as platform_revenue. That recognition is "breakage",
+-- so the accounting policy + EU VAT treatment are an owner/tax question ON THAT PATH; they are
+-- not a reason the path does not exist, and they do not affect the dormant default.
 
 create or replace function app.advertiser_gdpr_erase(p_advertiser_id uuid)
 returns jsonb
@@ -208,8 +211,9 @@ comment on function public.advertiser_writeoff_credit is
 -- the Phase 3 pending-deletion cron. Accepting a value nothing honors would be a silent broken
 -- promise about a user's money. Phase 3 extends this CHECK.
 --
--- NOT a protected column: app.advertisers_protect_cols (20260716150000) guards only
--- is_house / status / stripe_customer_id / billing_mode, so the erase path can set this.
+-- NOT a protected column: the live app.advertisers_protect_cols (20260722200000 §2, which
+-- superseded 20260716150000 §8) guards only is_house / status / stripe_customer_id /
+-- billing_mode plus dispute_hold_at, so the erase path can set this.
 alter table public.advertisers
   add column if not exists deletion_disposition text
     check (deletion_disposition in ('dormant', 'writeoff'));
