@@ -473,7 +473,7 @@ test('G15 — erasure is TERMINAL: an erased advertiser can neither be re-activa
     const winsBefore = winsAgainstA();
     assert.ok(Number(winsBefore) > 0, 'precondition: A really did open windows while it was alive');
 
-    const after = await servedLines(10);
+    const after = await servedLines(20);
     assert.ok(after.includes(lineB), `control failed: the non-erased twin never served (saw ${JSON.stringify(after)})`);
     assert.ok(!after.includes(lineA), 'an ERASED advertiser must never serve, even with campaign + line_item forced active');
     assert.equal(winsAgainstA(), winsBefore, 'not one further window was opened against the erased org');
