@@ -114,3 +114,75 @@ comment on function app.advertiser_gdpr_erase is
   'unspent, non-refundable balance can never block Art. 17 erasure. In-flight transactions '
   '(topup_pending / charge_pending / uncharged_postpay_billings), the house advertiser and a '
   'repeat call still refuse. Residual credit is left on the books as an unrecognized liability.';
+
+-- ---------------------------------------------------------------------------
+-- Task 2: public.advertiser_writeoff_credit() — opt-in self-serve zeroing of residual credit.
+--
+-- Leaving unspent prepaid credit on the books (above) is correct for erasure, but an advertiser
+-- may deliberately want it zeroed rather than left dormant forever. This is the explicit, opt-in
+-- counterpart: no argument (self-scoped via app.current_advertiser_id(), so it can never touch
+-- another org), refuses while reserved_micros > 0 (committed serve-window money is off limits —
+-- writing it off would break the BACKED-reserve invariant that reserved_micros ==
+-- SUM(ad_windows.reserve_micros), 20260716170000), and mirrors the debit branch of
+-- admin_advertiser_adjust_balance (20260716200000:501-572) exactly: FOR UPDATE row lock, then two
+-- zero-sum ledger_entries legs (platform_cash / advertiser_funds) under one entry_group_id.
+-- Booked to ledger_entries with event_type='advertiser_adjustment' — NOT to
+-- advertiser_balance_ledger, whose kind CHECK (20260716170000:119) has no 'writeoff' value.
+-- ---------------------------------------------------------------------------
+create or replace function public.advertiser_writeoff_credit()
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_adv   uuid;
+  v_bal   bigint;
+  v_res   bigint;
+  v_group uuid := gen_random_uuid();
+begin
+  v_adv := (select app.current_advertiser_id());
+  if v_adv is null then
+    raise exception 'unauthenticated' using errcode = '28000';
+  end if;
+
+  select balance_micros, reserved_micros into v_bal, v_res
+    from public.advertiser_balances where advertiser_id = v_adv for update;
+  if not found then
+    return jsonb_build_object('ok', false, 'reason', 'no_balance_row');
+  end if;
+  if v_res > 0 then
+    return jsonb_build_object('ok', false, 'reason', 'reserved_outstanding',
+                              'reserved_micros', v_res);
+  end if;
+  if v_bal = 0 then
+    return jsonb_build_object('ok', false, 'reason', 'nothing_to_write_off');
+  end if;
+
+  update public.advertiser_balances
+     set balance_micros = 0, updated_at = now()
+   where advertiser_id = v_adv;
+
+  insert into public.ledger_entries
+    (entry_group_id, event_type, account, amount_micros, state, source_type, source_id, advertiser_id)
+  values
+    (v_group, 'advertiser_adjustment', 'platform_cash',    -v_bal, 'cleared', 'advertiser_adjustment', v_adv, v_adv),
+    (v_group, 'advertiser_adjustment', 'advertiser_funds',  v_bal, 'cleared', 'advertiser_adjustment', v_adv, v_adv);
+
+  perform app.log_advertiser_action(v_adv, 'gdpr_writeoff', 'advertiser', v_adv,
+    jsonb_build_object('written_off_micros', v_bal, 'entry_group_id', v_group));
+
+  return jsonb_build_object('ok', true, 'advertiser_id', v_adv,
+                            'written_off_micros', v_bal, 'entry_group_id', v_group);
+end;
+$$;
+revoke all on function public.advertiser_writeoff_credit() from public, anon;
+grant  execute on function public.advertiser_writeoff_credit() to authenticated;
+
+comment on function public.advertiser_writeoff_credit is
+  'Self-serve, opt-in write-off of the caller''s OWN residual prepaid credit to zero. No argument '
+  '(target derived from app.current_advertiser_id()), so it cannot reach another org. Refuses '
+  'while reserved_micros > 0 — committed serve-window money is off limits and writing it off '
+  'would break the BACKED-reserve invariant. Books the two zero-sum ledger legs used by '
+  'admin_advertiser_adjust_balance; never written to advertiser_balance_ledger, whose kind CHECK '
+  'has no writeoff value. Audited to advertiser_action_log.';

@@ -10,7 +10,7 @@
 // WHAT IS TESTED:
 //   G1 — self-delete anonymizes the caller's OWN advertiser (name scrubbed, stripe_customer_id nulled,
 //        deleted_at set), tombstones the member auth email, pauses the org, PRESERVES the balance ledger
-//   G2 — refuses while balance>0 / a pending topup is in flight (row NOT anonymized)
+//   G2 — a nonzero balance no longer blocks self-delete; a pending topup still does
 //   G3 — idempotent (second call → already_deleted)
 //   G4 — a bystander advertiser B is completely untouched (no cross-org erasure)
 //   G5 — a session mapped to NO advertiser is rejected (unauthenticated)
@@ -19,6 +19,9 @@
 //   G8 — the house advertiser is refused (house_advertiser)
 //   G9 — an advertiser holding unspent credit CAN be erased (Phase 2 deadlock regression)
 //   G10 — in-flight transactions (a pending charge) still block erasure (guard not over-removed)
+//   G11 — an advertiser writes off its OWN residual credit; ledger stays zero-sum
+//   G12 — reserved credit cannot be written off (BACKED-reserve invariant)
+//   G13 — writeoff is self-scoped: it cannot touch another org
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -121,6 +124,7 @@ function teardown() {
     const advs = advIds.map((x) => `'${x}'`).join(',');
     if (advs) {
       parts.push(`delete from public.advertiser_balance_ledger where advertiser_id in (${advs});`);
+      parts.push(`delete from public.ledger_entries where advertiser_id in (${advs});`);
       parts.push(`delete from public.advertiser_action_log where advertiser_id in (${advs});`);
       parts.push(`delete from public.advertiser_topup_intents where advertiser_id in (${advs});`);
       parts.push(`delete from public.creatives where line_item_id in (select li.id from public.line_items li join public.campaigns c on c.id=li.campaign_id where c.advertiser_id in (${advs}));`);
@@ -184,6 +188,8 @@ test('G2: a nonzero balance no longer blocks self-delete, but a pending topup st
   psql(`update public.advertiser_topup_intents set status='credited' where advertiser_id='${A.advId}';`);
   res = await rpc('advertiser_gdpr_self_delete', {}, A.jwt);
   assert.equal(res.data.ok, true, 'erasure succeeds once money settled');
+  assert.equal(psql(`select balance_micros from public.advertiser_balances where advertiser_id='${A.advId}';`),
+    '5000000', 'balance is untouched by erasure — still nonzero, as claimed');
 });
 
 test('G3: idempotent — a second self-delete returns already_deleted', { skip: SKIP }, async () => {
@@ -272,4 +278,43 @@ test('G10 — in-flight TRANSACTIONS still block erasure (guard not over-removed
   const out = JSON.parse(psql(`select app.advertiser_gdpr_erase('${A.advId}')::text`));
   assert.equal(out.ok, false);
   assert.equal(out.reason, 'charge_pending');
+});
+
+test('G11 — an advertiser writes off its OWN residual credit, ledger stays zero-sum', { skip: SKIP }, async () => {
+  const A = seedAdvertiser({ balance: 40000000 });
+  const before = psql(`select coalesce(sum(amount_micros), 0) from public.ledger_entries`);
+
+  const res = await rpc('advertiser_writeoff_credit', {}, A.jwt);
+  assert.equal(res.data.ok, true, JSON.stringify(res.data));
+  assert.equal(String(res.data.written_off_micros), '40000000');
+  assert.equal(psql(
+    `select balance_micros from public.advertiser_balances where advertiser_id = '${A.advId}'`), '0');
+
+  // Zero-sum preserved: the write-off books two legs that cancel.
+  assert.equal(psql(`select coalesce(sum(amount_micros), 0) from public.ledger_entries`), before);
+  assert.equal(psql(
+    `select count(*) from public.ledger_entries where entry_group_id = '${res.data.entry_group_id}'`), '2');
+});
+
+test('G12 — reserved credit cannot be written off', { skip: SKIP }, async () => {
+  // reserved_micros is money already committed to serve windows. Writing it off would break the
+  // BACKED-reserve invariant (advertiser_balances.reserved_micros == SUM(ad_windows.reserve_micros)).
+  const A = seedAdvertiser({ balance: 40000000, reserved: 15000000 });
+
+  const res = await rpc('advertiser_writeoff_credit', {}, A.jwt);
+  assert.equal(res.data.ok, false);
+  assert.equal(res.data.reason, 'reserved_outstanding');
+  assert.equal(psql(
+    `select balance_micros from public.advertiser_balances where advertiser_id = '${A.advId}'`), '40000000');
+});
+
+test('G13 — writeoff is self-scoped: it cannot touch another org', { skip: SKIP }, async () => {
+  const A = seedAdvertiser({ balance: 5000000 });
+  const B = seedAdvertiser({ balance: 9000000 });
+
+  await rpc('advertiser_writeoff_credit', {}, A.jwt);
+  assert.equal(psql(
+    `select balance_micros from public.advertiser_balances where advertiser_id = '${B.advId}'`), '9000000');
+  assert.equal(psql(
+    `select balance_micros from public.advertiser_balances where advertiser_id = '${A.advId}'`), '0');
 });
