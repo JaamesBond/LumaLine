@@ -26,6 +26,10 @@
 //   G15 — erasure is TERMINAL: an erased advertiser cannot resume serving — the self-serve status
 //         RPCs refuse, and window_open refuses even when the rows are forced back to active
 //   G16 — admin_ledger_health()'s cleared-accrual identity survives an opt-in credit write-off
+//   G17 — the six self-serve CREATION/EDIT RPCs each succeed while live and refuse after erasure
+//   G18 — the DEPOSIT path (advertiser_deposit_self_id) resolves while live and refuses after erasure
+//   G19 — advertiser_data_export STILL WORKS after erasure (the Art. 15/20 over-gating guard)
+//   G20 — advertiser_writeoff_credit STILL WORKS after erasure (opt-in abandonment stays reachable)
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -526,4 +530,214 @@ test('G16 — the cleared-accrual identity survives an opt-in credit write-off',
   assert.equal(after.data.zero_sum_ok, true, 'zero-sum is unaffected either way');
   assert.ok(Number(after.data.cleared_platform_revenue_micros) - platBefore < WRITEOFF,
     'the write-off must NOT be counted into cleared accrual platform_revenue');
+});
+
+// ---------------------------------------------------------------------------
+// G17-G20 — the ERASED-ADVERTISER SURFACE AUDIT (20260726120000).
+//
+// app.advertiser_gdpr_erase KEEPS the advertiser_users mappings (that is what makes a repeat erasure
+// idempotent and keeps advertiser_data_export reachable), so a member of an erased org still
+// resolves app.current_advertiser_id() and every self-serve RPC stays CALLABLE. 20260726110000
+// closed only the spending path (window_open + resume). These four prove the rest of the surface is
+// now classified correctly: creation/edit/deposit REFUSE, and the two GDPR rights STAY OPEN.
+//
+// Every one of them asserts the LIVE precondition first — a refusal on a fixture that never worked
+// is indistinguishable from a no-op, and this repo has been bitten by that before.
+// ---------------------------------------------------------------------------
+
+// Drive one self-serve RPC and report ok/refusal in a single shape, so the before/after pairing
+// below compares like with like.
+async function callRpc(fn, args, jwt) {
+  const res = await rpc(fn, args, jwt);
+  return { ok: res.ok, status: res.status, blob: JSON.stringify(res.data ?? {}) };
+}
+
+test('G17 — the six self-serve creation/edit RPCs refuse an ERASED advertiser (and work while live)', { skip: SKIP }, async () => {
+  const A = seedAdvertiser({ balance: 50000000 });
+  const FLOOR = Number(psql('select app.advertiser_min_bid_micros();'));
+  assert.ok(FLOOR > 0, 'precondition: a real bid floor is configured');
+
+  // --- PRECONDITION: all six really are reachable and SUCCEED for a LIVE advertiser. ---
+  // Each call also builds the fixture the next one edits, so the post-erasure half operates on rows
+  // that genuinely exist and are genuinely in an editable state — the guard must be the ONLY reason
+  // the second half fails.
+  const mkCampaign = await callRpc('advertiser_create_campaign', { p_name: 'G17 live campaign' }, A.jwt);
+  assert.ok(mkCampaign.ok, `precondition: create_campaign refused while live: ${mkCampaign.blob}`);
+  const campId = JSON.parse(mkCampaign.blob).campaign_id;
+
+  const mkLine = await callRpc('advertiser_create_line_item',
+    { p_campaign_id: campId, p_cpva_bid_micros: FLOOR * 2 }, A.jwt);
+  assert.ok(mkLine.ok, `precondition: create_line_item refused while live: ${mkLine.blob}`);
+  const liId = JSON.parse(mkLine.blob).line_item_id;
+
+  const edLine = await callRpc('advertiser_edit_line_item',
+    { p_id: liId, p_cpva_bid_micros: FLOOR * 3 }, A.jwt);
+  assert.ok(edLine.ok, `precondition: edit_line_item refused while live: ${edLine.blob}`);
+
+  const mkCreative = await callRpc('advertiser_submit_creative',
+    { p_line_item_id: liId, p_line: 'G17 honest signed line', p_dest_url: 'https://example.test/g17', p_label: 'sponsored' }, A.jwt);
+  assert.ok(mkCreative.ok, `precondition: submit_creative refused while live: ${mkCreative.blob}`);
+  const crId = JSON.parse(mkCreative.blob).creative_id;
+
+  const edCreative = await callRpc('advertiser_edit_creative',
+    { p_id: crId, p_line: 'G17 edited line', p_dest_url: 'https://example.test/g17b', p_label: 'sponsored' }, A.jwt);
+  assert.ok(edCreative.ok, `precondition: edit_creative refused while live: ${edCreative.blob}`);
+
+  const upProfile = await callRpc('advertiser_update_profile', { p_name: 'G17 Live Name' }, A.jwt);
+  assert.ok(upProfile.ok, `precondition: update_profile refused while live: ${upProfile.blob}`);
+  assert.equal(psql(`select name from public.advertisers where id='${A.advId}';`), 'G17 Live Name',
+    'precondition: the profile rename really landed while live');
+
+  // --- ERASE ---
+  const erased = await rpc('advertiser_gdpr_self_delete', {}, A.jwt);
+  assert.equal(erased.data.ok, true, `erase failed: ${JSON.stringify(erased.data)}`);
+
+  // The mapping really IS kept — otherwise these RPCs would refuse with 'unauthenticated' (28000)
+  // and this whole test would be asserting the wrong refusal.
+  assert.equal(psql(`select count(*) from public.advertiser_users where advertiser_id='${A.advId}';`), '1',
+    'precondition: erasure keeps the member mapping, so current_advertiser_id() still resolves');
+  assert.equal(psql(`select (deleted_at is not null) from public.advertisers where id='${A.advId}';`), 't');
+
+  // The edit targets must still be in an EDITABLE state after erasure, so a refusal cannot be the
+  // pre-existing state check firing instead of the new guard. (erase pauses only 'active' rows.)
+  assert.equal(psql(`select status from public.line_items where id='${liId}';`), 'draft');
+  assert.equal(psql(`select status from public.creatives where id='${crId}';`), 'pending_review');
+
+  // --- AFTER: every one of the six refuses, with account_deleted. ---
+  const after = [
+    ['advertiser_create_campaign',  { p_name: 'G17 post-erasure campaign' }],
+    ['advertiser_create_line_item', { p_campaign_id: campId, p_cpva_bid_micros: FLOOR * 2 }],
+    ['advertiser_edit_line_item',   { p_id: liId, p_cpva_bid_micros: FLOOR * 4 }],
+    ['advertiser_submit_creative',  { p_line_item_id: liId, p_line: 'G17 post line', p_dest_url: 'https://example.test/g17c', p_label: 'sponsored' }],
+    ['advertiser_edit_creative',    { p_id: crId, p_line: 'G17 post edit', p_dest_url: 'https://example.test/g17d', p_label: 'sponsored' }],
+    ['advertiser_update_profile',   { p_name: 'G17 Resurrected Name' }],
+  ];
+  for (const [fn, args] of after) {
+    const res = await callRpc(fn, args, A.jwt);
+    assert.ok(!res.ok && res.status >= 400, `${fn} must refuse an erased advertiser, got ${res.status} ${res.blob}`);
+    assert.match(res.blob, /account_deleted/, `${fn} must refuse with account_deleted, got ${res.blob}`);
+  }
+
+  // Refusals must be REAL — nothing was written behind them.
+  assert.equal(psql(`select count(*) from public.campaigns where advertiser_id='${A.advId}' and name='G17 post-erasure campaign';`), '0',
+    'no campaign was created for an erased org');
+  assert.equal(psql(`select count(*) from public.line_items where campaign_id='${campId}';`), '1',
+    'no second line_item was created for an erased org');
+  assert.equal(psql(`select cpva_bid_micros from public.line_items where id='${liId}';`), String(FLOOR * 3),
+    'the refused edit did not change the bid');
+  assert.equal(psql(`select line from public.creatives where id='${crId}';`), 'G17 edited line',
+    'the refused creative edit did not change the copy');
+  assert.equal(psql(`select count(*) from public.creatives where line_item_id='${liId}';`), '1',
+    'no second creative was submitted for an erased org');
+
+  // The most important one: the erased org's name must still be the anonymized tombstone. A
+  // successful update_profile would have UNDONE the erasure's in-place anonymization.
+  assert.match(psql(`select name from public.advertisers where id='${A.advId}';`), /^deleted-/,
+    'the refused rename must leave the anonymized name intact — erasure is not reversible by rename');
+});
+
+test('G18 — the DEPOSIT path refuses an ERASED advertiser (pre-money, at the DB resolver)', { skip: SKIP }, async () => {
+  // advertiser-portal POST /funding/checkout resolves the depositing org via
+  // public.advertiser_deposit_self_id BEFORE it creates a Stripe Checkout session. Gating there is
+  // what makes the refusal pre-money: an erased org can never be charged for credit it could never
+  // spend (window_open excludes deleted_at orgs). The edge function only surfaces this refusal, so
+  // testing the RPC tests the gate itself — and does so without touching Stripe.
+  const A = seedAdvertiser({ balance: 0 });
+
+  // --- PRECONDITION: a LIVE advertiser resolves normally, so the refusal below is the erasure
+  // guard and not a broken fixture. ---
+  const live = await rpc('advertiser_deposit_self_id', {}, A.jwt);
+  assert.ok(live.ok, `precondition: deposit resolver refused a LIVE advertiser: ${JSON.stringify(live.data)}`);
+  assert.equal(live.data, A.advId, 'precondition: the resolver returns the caller\'s OWN advertiser id');
+
+  // The ungated read-path twin must agree while live — the two differ ONLY after erasure.
+  const selfLive = await rpc('advertiser_self_id', {}, A.jwt);
+  assert.equal(selfLive.data, A.advId, 'precondition: advertiser_self_id agrees while live');
+
+  // --- ERASE ---
+  const erased = await rpc('advertiser_gdpr_self_delete', {}, A.jwt);
+  assert.equal(erased.data.ok, true, `erase failed: ${JSON.stringify(erased.data)}`);
+
+  // --- AFTER: the deposit resolver refuses; no Checkout session can be opened. ---
+  const dead = await rpc('advertiser_deposit_self_id', {}, A.jwt);
+  assert.ok(!dead.ok && dead.status >= 400, `deposit resolver must refuse an erased org, got ${dead.status}`);
+  assert.match(JSON.stringify(dead.data ?? {}), /account_deleted/, 'deposit refusal must carry account_deleted');
+
+  // ...while the UNGATED identity primitive still resolves. This is the whole reason the deposit
+  // path got its own resolver: advertiser_self_id backs the read-only surfaces, which stay open.
+  const selfDead = await rpc('advertiser_self_id', {}, A.jwt);
+  assert.ok(selfDead.ok, 'advertiser_self_id must stay ungated — the read-only surfaces depend on it');
+  assert.equal(selfDead.data, A.advId, 'advertiser_self_id still resolves after erasure');
+
+  // Structural backstop on the credit authority: an erased org has no way to get a topup_intent row,
+  // because the only self-serve entry is the checkout endpoint we just closed. `authenticated` holds
+  // SELECT-only on the table (no INSERT grant), so PostgREST cannot route around the edge function.
+  const direct = await fetch(`${REST_BASE}/advertiser_topup_intents`, {
+    method: 'POST',
+    headers: { apikey: ANON, Authorization: `Bearer ${A.jwt}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ checkout_session_id: `cs_test_${randomUUID()}`, advertiser_id: A.advId, amount_micros: 5000000, status: 'pending' }),
+  });
+  assert.ok(!direct.ok, 'an authenticated caller must not be able to INSERT a topup_intent directly');
+  assert.equal(psql(`select count(*) from public.advertiser_topup_intents where advertiser_id='${A.advId}';`), '0',
+    'no credit-authority row exists for the erased org');
+});
+
+test('G19 — advertiser_data_export STILL WORKS after erasure (Art. 15/20 over-gating guard)', { skip: SKIP }, async () => {
+  // This is the guard against fixing the gap too hard. GDPR Art. 15/20 is the data subject's right
+  // of ACCESS and PORTABILITY; it does not lapse because they exercised Art. 17. An erasure that
+  // destroyed the export would recreate exactly the class of defect Phase 2 exists to remove
+  // (20260726100000: conditioning a data-protection right on something the user cannot reach), so
+  // this failing matters as much as any refusal above.
+  const A = seedAdvertiser({ balance: 20000000 });
+
+  const before = await rpc('advertiser_data_export', {}, A.jwt);
+  assert.ok(before.ok, `precondition: export failed while live: ${JSON.stringify(before.data)}`);
+  assert.ok(before.data.campaigns.length >= 1 && before.data.creatives.length >= 1,
+    'precondition: the export is over a NON-EMPTY fixture, so "still works" is not vacuous');
+  const campsBefore = before.data.campaigns.length;
+  const depositsBefore = before.data.deposits.length;
+
+  const erased = await rpc('advertiser_gdpr_self_delete', {}, A.jwt);
+  assert.equal(erased.data.ok, true, `erase failed: ${JSON.stringify(erased.data)}`);
+
+  const after = await rpc('advertiser_data_export', {}, A.jwt);
+  assert.ok(after.ok, `advertiser_data_export MUST remain callable after erasure, got ${after.status} ${JSON.stringify(after.data)}`);
+  assert.doesNotMatch(JSON.stringify(after.data ?? {}), /account_deleted/,
+    'the export must not be gated behind an account_deleted refusal');
+
+  // ...and it must still return the subject's actual records, not an empty husk. The preserved
+  // financial history is the part a data subject most needs after erasure.
+  assert.equal(after.data.advertiser.id, A.advId, 'the export still resolves the caller\'s own org');
+  assert.equal(after.data.campaigns.length, campsBefore, 'campaigns still exported after erasure');
+  assert.equal(after.data.deposits.length, depositsBefore, 'the preserved deposit ledger still exports');
+  assert.ok(after.data.spend && after.data.spend.totals, 'the embedded spend summary still resolves');
+
+  // The exported org name is the anonymized one — erasure still did its job; only ACCESS survived.
+  assert.match(after.data.advertiser.name, /^deleted-/, 'the export reflects the anonymized name');
+});
+
+test('G20 — advertiser_writeoff_credit STILL WORKS after erasure (opt-in abandonment stays open)', { skip: SKIP }, async () => {
+  // An erased org electing to abandon residual credit is legitimate — it is the documented opt-in
+  // counterpart to the dormant-balance default, and erasure deliberately leaves the balance on the
+  // books. Gating it would trap the residual credit forever with no way to resolve it.
+  const A = seedAdvertiser({ balance: 30000000 });
+  const zeroSumBefore = psql('select coalesce(sum(amount_micros), 0) from public.ledger_entries');
+
+  const erased = await rpc('advertiser_gdpr_self_delete', {}, A.jwt);
+  assert.equal(erased.data.ok, true, `erase failed: ${JSON.stringify(erased.data)}`);
+  assert.equal(psql(`select balance_micros from public.advertiser_balances where advertiser_id='${A.advId}';`),
+    '30000000', 'precondition: erasure leaves the residual credit on the books');
+
+  const wo = await rpc('advertiser_writeoff_credit', {}, A.jwt);
+  assert.ok(wo.ok, `writeoff MUST remain callable after erasure, got ${wo.status} ${JSON.stringify(wo.data)}`);
+  assert.equal(wo.data.ok, true, `writeoff refused an erased org: ${JSON.stringify(wo.data)}`);
+  assert.equal(String(wo.data.written_off_micros), '30000000');
+  assert.equal(psql(`select balance_micros from public.advertiser_balances where advertiser_id='${A.advId}';`), '0',
+    'the residual credit really was zeroed');
+
+  // Zero-sum must survive the post-erasure path exactly as it does the live one (G11).
+  assert.equal(psql('select coalesce(sum(amount_micros), 0) from public.ledger_entries'), zeroSumBefore,
+    'the post-erasure write-off keeps the ledger zero-sum');
+  assert.equal(psql(`select count(*) from public.ledger_entries where entry_group_id='${wo.data.entry_group_id}' and account='platform_cash';`),
+    '0', 'no cash leg on a write-off, erased or not');
 });
