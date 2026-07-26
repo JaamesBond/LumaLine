@@ -6,10 +6,11 @@ settled + reconciled 2026-07-04** (§5d). All three self-serve dashboards **live
 (M7 publisher `/app`, M8 admin, M9 advertiser — §5f); **advertiser deposits LIVE 2026-07-23**
 (prepaid non-refundable ad credit, ToS v2.0 in force). Security-audit hardening **deployed
 2026-07-22** (§5g). Payouts reach **34 countries** (EEA + US/GB/CA/CH, §5h). Client `lumaline@0.1.7`
-= npm latest. **GDPR account-lifecycle Phases 1–3 merged** (§5i); Phase 1's retention sweep is live
-on prod and ran clean 2026-07-26. **Open:** first REAL publisher payout (§5h note on RO law), issue
-#45 (integration suite vs the concurrent-open cap), and **`main` is two migrations ahead of prod** —
-`20260726120000` + `20260727100000` are merged but NOT deployed (§5i).
+= npm latest. **GDPR account-lifecycle Phases 1–3 merged AND fully deployed 2026-07-26** — `main`
+and prod are both at 75 migrations (§5i). **Open:** first REAL publisher payout (§5h note on RO
+law), issue #45 (integration suite vs the concurrent-open cap); and two deliberate non-deploys —
+`auth-device` still lacks the `deletion_pending` mapping (degrades safely) and the Phase 3
+completion cron is not yet scheduled (§5i).
 **Backend project:** Supabase `prmsonskzrubqsazmpwd` (the LumaLine project — **not** the unrelated CRM `kvlfpwzmjxuapjheknnj`).
 
 > **Security-audit hardening (2026-07-22, PR #39 — MERGED + DEPLOYED):**
@@ -727,18 +728,46 @@ Spec: `docs/superpowers/specs/2026-07-25-gdpr-lifecycle-design.md`. Five deliver
 lifecycle but almost no code, shipped **one phase per branch+PR** on owner directive. Phases 1–3 are
 **merged**; 4 and 5 are not started.
 
-**⚠️ `main` is TWO MIGRATIONS AHEAD OF PRODUCTION.** Verified against `prmsonskzrubqsazmpwd`
-2026-07-26 (read-only, ref-guarded runner):
+**✅ SCHEMA FULLY DEPLOYED 2026-07-26.** `main` and `prmsonskzrubqsazmpwd` are at the same 75
+migrations. All five GDPR migrations are live:
 
 | Migration | PR | On `main` | On prod |
 |---|---|---|---|
-| `20260725100000_retention_sweep` | #51 | ✅ | ✅ **deployed + cron scheduled + ran clean** |
+| `20260725100000_retention_sweep` | #51 | ✅ | ✅ deployed + cron scheduled + ran clean |
 | `20260726100000_advertiser_erasure_split` | #52 | ✅ | ✅ deployed |
 | `20260726110000_erasure_terminal_and_ledger_health` | #53 | ✅ | ✅ deployed |
-| `20260726120000_erased_advertiser_surface` | #53 | ✅ | ❌ **NOT deployed** |
-| `20260727100000_gdpr_pending_deletion` | #54 | ✅ | ❌ **NOT deployed** |
+| `20260726120000_erased_advertiser_surface` | #53 | ✅ | ✅ **deployed 2026-07-26** |
+| `20260727100000_gdpr_pending_deletion` | #54 | ✅ | ✅ **deployed 2026-07-26** |
 
-`auth-device` also carries an undeployed change (the `deletion_pending` status mapping).
+**Deploy evidence (2026-07-26).** `supabase db push --linked` after a dry run that confirmed exactly
+those two files. Pre-flight: 4 publishers / 2 advertisers (so the non-`CONCURRENTLY` index build is
+microseconds), every `deletion_disposition` NULL (so the widened CHECK rejects nothing), **zero
+dependents** on the 0-arg `advertiser_gdpr_self_delete()` being dropped, one `money_admin` present
+(spec §9.3 hazard 2), and a money snapshot of `ledger_sum=0 / 90 rows / 0 payouts in flight / 0
+balances`. Post-deploy: **that money snapshot is byte-identical**; 75 migrations; both watermark
+columns + both partial indexes + the widened CHECK present; the 0-arg overload gone and the
+`(text)` form present; `anon` has EXECUTE on **none** of the new functions and `authenticated` on
+neither `app.gdpr_complete_pending` nor `device_code_redeem`; **zero** rows pending and **zero**
+devices revoked by the deploy (the one revoked device dates from 2026-06-29). Security advisors:
+**0 ERROR before, 0 ERROR after** — the 3 new WARNs are all
+`authenticated_security_definer_function_executable`, the same class already firing on every
+sibling self-serve SECDEF RPC. A PostgREST `notify pgrst, 'reload schema'` was issued and the new
+signatures were smoke-tested **as `anon`** (which holds no EXECUTE, so no body could run): all
+returned `42501 permission denied` rather than `PGRST202 not found`, proving both that the schema
+cache refreshed and that a `{}` body resolves unambiguously to the defaulted-parameter form.
+Runbook STEP 1 returned all zeroes with `skipped: []`.
+
+**Two things are deliberately still NOT done:**
+
+1. **`auth-device` is not redeployed** — it still lacks the `deletion_pending` status mapping. Safe:
+   the RPC's new status falls through the edge function's existing `if (status !== "approved")`
+   branch to `invalid_grant`, which the CLI already treats as non-retryable. The freeze is enforced
+   in the database either way; only the error message is less specific.
+2. **The completion cron is not scheduled** — `app.gdpr_complete_pending()` exists and is reachable
+   but nothing calls it, so a pending deletion would sit until someone runs it. Scheduling is
+   `scripts/ops/pending-deletion-enable.sql` STEP 4 (hourly `23 * * * *`, verified free against
+   prod's live job set, which includes two jobs absent locally: `lumaline-monitor-hourly` at `:07`
+   and `lumaline-payout-weekly` Mondays 09:00).
 
 ### Phase 1 — retention sweep (PR #51, DEPLOYED + LIVE)
 
@@ -771,7 +800,7 @@ books a zero-sum `advertiser_funds`/`platform_revenue` pair — **no `platform_c
 cash moves) and the `deletion_disposition` column (`dormant`|`writeoff`; `spend_down` deliberately
 withheld until Phase 3 shipped the cron to honour it).
 
-### Erased-advertiser surface audit (PR #53, HALF-DEPLOYED)
+### Erased-advertiser surface audit (PR #53, DEPLOYED)
 
 Erasure keeps the `advertiser_users` mappings (that is what makes a repeat erasure idempotent and
 keeps the data export reachable), so `app.current_advertiser_id()` still resolves for an erased org
@@ -782,7 +811,7 @@ while `advertiser_data_export` and `advertiser_writeoff_credit` deliberately **s
 15/20 does not lapse because Art. 17 was exercised, and gating the write-off would trap the residual
 credit forever).
 
-### Phase 3 — pending-deletion state machine (PR #54, NOT DEPLOYED)
+### Phase 3 — pending-deletion state machine (PR #54, DEPLOYED 2026-07-26; cron not yet scheduled)
 
 `20260727100000_gdpr_pending_deletion.sql` + `scripts/ops/pending-deletion-enable.sql`. The request
 path becomes **erase-or-enter-pending**; the money gate is byte-identical and both erasure bodies are
