@@ -155,6 +155,75 @@ test('D6 — TRUNCATE is stripped from both public roles (it bypasses RLS)', { s
   const out = underDriftThenFix(probe);
 
   assert.match(out, /drifted anon TRUNCATE publishers: true/);
+  assert.match(out, /drifted authenticated TRUNCATE publishers: true/);
   assert.match(out, /fixed anon TRUNCATE publishers: false/);
   assert.match(out, /fixed authenticated TRUNCATE publishers: false/);
+});
+
+test('D7 — anon holds SELECT on nothing in public', { skip: SKIP }, () => {
+  // The drift is arwdDxtm: the `r` is SELECT, and stripping DML alone leaves the read surface
+  // wide open. main grants anon SELECT on zero relations.
+  const probe = `select /*STAGE*/ || ' anon_readable=' || count(*)::text
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public' and c.relkind in ('r','v')
+      and has_table_privilege('anon', c.oid, 'SELECT');`;
+  const out = underDriftThenFix(probe);
+
+  assert.doesNotMatch(out, /drifted anon_readable=0/, 'precondition: the drift must grant anon reads');
+  assert.match(out, /fixed anon_readable=0/);
+});
+
+test('D8 — the RLS-bypassing definer view is not readable by a client role', { skip: SKIP }, () => {
+  // public.uncharged_advertiser_billings is service_role-only in main and lost its
+  // security_invoker, so a surviving SELECT bypasses base-table RLS and leaks
+  // stripe_customer_id / advertiser_name / per-publisher billing to the public anon key.
+  const probe = `select /*STAGE*/ || ' anon=' ||
+      has_table_privilege('anon','public.uncharged_advertiser_billings','SELECT')::text
+    || ' authenticated=' ||
+      has_table_privilege('authenticated','public.uncharged_advertiser_billings','SELECT')::text
+    || ' service_role=' ||
+      has_table_privilege('service_role','public.uncharged_advertiser_billings','SELECT')::text;`;
+  const out = underDriftThenFix(probe);
+
+  assert.match(out, /drifted anon=true authenticated=true/, 'precondition: drift exposes the view');
+  assert.match(out, /fixed anon=false authenticated=false service_role=true/);
+});
+
+test('D10 — whole-schema invariant: the client roles end exactly where main puts them', { skip: SKIP }, () => {
+  // The strongest statement available: simulate the full production drift, apply the migration,
+  // and count the security-relevant surface across every relation in `public`.
+  const cnt = (role, privs) => `(select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace
+      where n.nspname='public' and c.relkind in ('r','v')
+        and (${privs.map((p) => `has_table_privilege('${role}',c.oid,'${p}')`).join(' or ')}))::text`;
+  const probe = `select /*STAGE*/ || ' anonR=' || ${cnt('anon', ['SELECT'])}
+    || ' anonW=' || ${cnt('anon', ['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE'])}
+    || ' authR=' || ${cnt('authenticated', ['SELECT'])}
+    || ' authW=' || ${cnt('authenticated', ['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE'])};`;
+  const out = underDriftThenFix(probe);
+
+  // Under the drift every client role can read and write everything.
+  assert.match(out, /drifted anonR=35 anonW=35 authR=35 authW=35/);
+
+  // After: anon reaches nothing at all; authenticated reads the 26 relations main grants it and
+  // writes only clawback_reviews and disputes. Residual REFERENCES/TRIGGER/MAINTAIN may linger
+  // where the drift created an ACL entry — neither is a read or a write.
+  assert.match(out, /fixed anonR=0 anonW=0 authR=26 authW=2/);
+});
+
+test('D9 — advertisers: table read revoked, column-scoped read survives', { skip: SKIP }, () => {
+  // 20260716150000 deliberately revoked whole-table SELECT and column-scoped it so
+  // stripe_customer_id / is_house never reach a client. The table-level REVOKE cascades into
+  // those column ACLs, so the re-grant is load-bearing — without it the advertiser portal
+  // cannot read its own org at all.
+  const probe = `select /*STAGE*/ || ' table=' ||
+      has_table_privilege('authenticated','public.advertisers','SELECT')::text
+    || ' name_col=' ||
+      has_column_privilege('authenticated','public.advertisers','name','SELECT')::text
+    || ' stripe_customer_id_col=' ||
+      has_column_privilege('authenticated','public.advertisers','stripe_customer_id','SELECT')::text;`;
+  const out = underDriftThenFix(probe);
+
+  assert.match(out, /drifted table=true name_col=true stripe_customer_id_col=true/);
+  // After: no whole-table read, the five safe columns survive, the sensitive one does not.
+  assert.match(out, /fixed table=false name_col=true stripe_customer_id_col=false/);
 });
