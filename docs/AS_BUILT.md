@@ -1,13 +1,15 @@
 # LumaLine — AS-BUILT Reconciliation & Deferral Ledger
 
 **Status:** Authoritative map of what *is built* vs. what the older design docs *describe*.
-**As of:** 2026-07-25. **M0–M9 DONE + merged + DEPLOYED.** First real advertiser charge **€1.10
+**As of:** 2026-07-26. **M0–M9 DONE + merged + DEPLOYED.** First real advertiser charge **€1.10
 settled + reconciled 2026-07-04** (§5d). All three self-serve dashboards **live on lumaline.dev**
 (M7 publisher `/app`, M8 admin, M9 advertiser — §5f); **advertiser deposits LIVE 2026-07-23**
 (prepaid non-refundable ad credit, ToS v2.0 in force). Security-audit hardening **deployed
 2026-07-22** (§5g). Payouts reach **34 countries** (EEA + US/GB/CA/CH, §5h). Client `lumaline@0.1.7`
-= npm latest. **Open:** first REAL publisher payout (§5h note on RO law), issue #45 (integration
-suite vs the concurrent-open cap).
+= npm latest. **GDPR account-lifecycle Phases 1–3 merged** (§5i); Phase 1's retention sweep is live
+on prod and ran clean 2026-07-26. **Open:** first REAL publisher payout (§5h note on RO law), issue
+#45 (integration suite vs the concurrent-open cap), and **`main` is two migrations ahead of prod** —
+`20260726120000` + `20260727100000` are merged but NOT deployed (§5i).
 **Backend project:** Supabase `prmsonskzrubqsazmpwd` (the LumaLine project — **not** the unrelated CRM `kvlfpwzmjxuapjheknnj`).
 
 > **Security-audit hardening (2026-07-22, PR #39 — MERGED + DEPLOYED):**
@@ -718,6 +720,139 @@ IDE terminals, upstream #26356; CPVA/views is the dependable model everywhere).
 - **Docs housekeeping (2026-07-25):** deleted dead one-shot docs (`BLOCKED.md`, `RUN_LOG.md`,
   `LAUNCH_RUN_PROMPT.md`, `REVIEW_TODO.md` — the one live nit became issue #49); `ops/HANDOFF.md`
   reduced to a pointer; onboarding runbooks + `CLAUDE.md` + `MILESTONE_STATUS.md` refreshed.
+
+## 5i. GDPR account-lifecycle phases 1–3 (2026-07-25→26)
+
+Spec: `docs/superpowers/specs/2026-07-25-gdpr-lifecycle-design.md`. Five deliverables that share the
+lifecycle but almost no code, shipped **one phase per branch+PR** on owner directive. Phases 1–3 are
+**merged**; 4 and 5 are not started.
+
+**⚠️ `main` is TWO MIGRATIONS AHEAD OF PRODUCTION.** Verified against `prmsonskzrubqsazmpwd`
+2026-07-26 (read-only, ref-guarded runner):
+
+| Migration | PR | On `main` | On prod |
+|---|---|---|---|
+| `20260725100000_retention_sweep` | #51 | ✅ | ✅ **deployed + cron scheduled + ran clean** |
+| `20260726100000_advertiser_erasure_split` | #52 | ✅ | ✅ deployed |
+| `20260726110000_erasure_terminal_and_ledger_health` | #53 | ✅ | ✅ deployed |
+| `20260726120000_erased_advertiser_surface` | #53 | ✅ | ❌ **NOT deployed** |
+| `20260727100000_gdpr_pending_deletion` | #54 | ✅ | ❌ **NOT deployed** |
+
+`auth-device` also carries an undeployed change (the `deletion_pending` status mapping).
+
+### Phase 1 — retention sweep (PR #51, DEPLOYED + LIVE)
+
+`app.retention_sweep()` enforces privacy-policy §8. **Column-level scrubbing, not deletion**:
+`impressions.ip_hash/asn` past 90d, `ad_windows.ip_hash` past 7d, `clicks.click_token_hash` past 90d
+(to a per-row sentinel); only `device_auth_codes` are deleted (past 24h). No row that anchors money
+is ever removed — `impressions` anchor `ledger_entries`, and `app.advertiser_expected_reserved` sums
+`ad_windows.reserve_micros` with **no time bound** as the RHS of money invariant (C) RESERVED.
+`risk_flags` is deliberately **not** swept (`clawback_reviews` references it NO ACTION, and a
+pending review is what blocks clearing fraud-flagged revenue).
+
+**Live on prod:** cron `lumaline-retention-sweep` at `53 3 * * *`, active; first run
+2026-07-26 03:53 UTC **succeeded**. (Supersedes any earlier note saying Phase 1 was merged but not
+enabled.) Test-strength deferrals from this phase: **D16–D18**; the unbounded-growth residual is
+**D19**.
+
+### Phase 2 — split personal-data erasure from commercial closure (PR #52, DEPLOYED)
+
+Removed the advertiser **idle-balance gate** from `app.advertiser_gdpr_erase`. Deposits are
+non-refundable and there is no withdrawal RPC, so gating erasure on `balance_micros > 0` made Art. 17
+erasure permanently unreachable for anyone holding credit — not "later", *never*. One check was
+gating two different things: erasure of a **natural person's** data and settlement of a **legal
+entity's** money.
+
+**Kept:** `house_advertiser`, `already_deleted`, and the three in-flight-**transaction** guards
+(`topup_pending`, `charge_pending`, `uncharged_postpay_billings`). By default the residual balance is
+left **on the books** as an unrecognized liability — erasure never sweeps it. Added the opt-in
+counterpart `public.advertiser_writeoff_credit()` (self-scoped, refuses while `reserved_micros > 0`,
+books a zero-sum `advertiser_funds`/`platform_revenue` pair — **no `platform_cash` leg**, because no
+cash moves) and the `deletion_disposition` column (`dormant`|`writeoff`; `spend_down` deliberately
+withheld until Phase 3 shipped the cron to honour it).
+
+### Erased-advertiser surface audit (PR #53, HALF-DEPLOYED)
+
+Erasure keeps the `advertiser_users` mappings (that is what makes a repeat erasure idempotent and
+keeps the data export reachable), so `app.current_advertiser_id()` still resolves for an erased org
+and every self-serve RPC stayed **callable**. `20260726110000` closed the spending path
+(`window_open` gained `a.deleted_at is null`; the two resume RPCs refuse with `account_deleted`);
+`20260726120000` classified the rest — six creation/edit RPCs and the deposit resolver **refuse**,
+while `advertiser_data_export` and `advertiser_writeoff_credit` deliberately **stay open** (Art.
+15/20 does not lapse because Art. 17 was exercised, and gating the write-off would trap the residual
+credit forever).
+
+### Phase 3 — pending-deletion state machine (PR #54, NOT DEPLOYED)
+
+`20260727100000_gdpr_pending_deletion.sql` + `scripts/ops/pending-deletion-enable.sql`. The request
+path becomes **erase-or-enter-pending**; the money gate is byte-identical and both erasure bodies are
+**called, never copied**.
+
+- **`deletion_requested_at`** on `publishers` + `advertisers` (partial indexes on the cron's
+  predicate). Neither is protected by `app.advertisers_protect_cols`. `spend_down` joins the
+  disposition CHECK.
+- **`app.gdpr_deferrable_reason(text)`** — an **allow-list** classifying refusals as deferrals
+  (`payout_in_flight`, `topup_pending`, `charge_pending`, `uncharged_postpay_billings`) vs terminal
+  (`already_deleted`, `house_advertiser`). Allow-list so a future reason defaults to terminal:
+  wrongly deferring freezes an account for a deletion that can never complete, and scheduling the
+  house advertiser would freeze the beta sentinel permanently.
+- **Freeze.** Publisher = **device revocation**, which stops serving through `window_open`'s existing
+  `d.revoked_at is null` check with **no hot-path change**; `publishers.status` deliberately stays
+  `'active'` because Phase 4's `payout_batch_reserve` predicate requires it. Advertiser = pause
+  campaigns/line_items, **except under `spend_down`**, where credit must stay spendable.
+- **The freeze is enforced, not advisory.** `device_code_redeem` (the sole device-mint point) returns
+  `deletion_pending` without consuming the grant; the two resume RPCs refuse while pending
+  (`spend_down` exempt). Without these, `lumaline login` or one Resume click undid the freeze — the
+  same defect class #53 closed one state later. `window_open` is **untouched**; the residual (a
+  pending advertiser forced back to `active` behind the RPCs still serves) is the pre-existing
+  terminal-erasure boundary and closes within the hour.
+- **`public.advertiser_gdpr_self_delete(p_disposition text default 'dormant')`** — the no-arg form is
+  **DROPPED** (`CREATE OR REPLACE` cannot change an argument list; leaving it makes the portal's
+  zero-arg call ambiguous). The default preserves that call over SQL and over a PostgREST `{}` body.
+  `'writeoff'` is **refused** here: this function moves no money, so recording it would be exactly
+  the silent broken promise Phase 2 avoided.
+- **`app.gdpr_complete_pending(p_overdue, p_limit)`** — hourly, service_role only. Each row is
+  isolated in its own subtransaction so one stuck account cannot strand every other data subject;
+  failures are **reported** in `skipped`, never swallowed. Each row is re-read **`FOR UPDATE`** and
+  re-verified before erasing — without that, a cancel landing mid-pass was still erased,
+  irreversibly (proven with two concurrent sessions; the cancelled row survived while a control in
+  the same pass was erased). `spend_down` additionally requires `balance_micros` **and**
+  `reserved_micros` to be zero (a reserve is a hold *within* the balance; erasing over one strands a
+  hold that `advertiser_reconcile_reserved` could later "self-heal").
+- **Art. 12(3) alert** — `app.alert_events` `gdpr_pending_overdue` at 25 days, five days of margin.
+  Raises **and resolves**, mirroring `monitor_sync_alerts`' `ON CONFLICT` against the partial unique
+  index on open `(check_name, dedup_key)`.
+- **Cancel** — `gdpr_cancel_deletion()` / `advertiser_gdpr_cancel_deletion()`, self-scoped, refused
+  with `already_deleted` after erasure. Advertiser cancel restores **exactly** what the freeze paused
+  (ids recorded in the `gdpr_pending` action-log payload) — a blanket unpause would resurrect
+  campaigns the advertiser had deliberately stopped and resume spending their money. Publisher cancel
+  does **not** un-revoke devices; the payload reports `devices_still_revoked` + a `next_step`.
+- **Cron NOT scheduled by the migration.** `scripts/ops/pending-deletion-enable.sql`, hourly at
+  **`23 * * * *`** — free by construction against prod's jobs (`:00` clear-events, `:07`
+  monitor-hourly, `03:17`/`03:41`/`03:53` selfdeal/sybil/retention, plus the `*/2`, `*/5`, `*/10`
+  jobs; 23 is odd and not a multiple of 5 or 10). Its STEP 2 is a **rehearsal inside a rolled-back
+  transaction**, because on a fresh deploy STEP 1 returns all zeroes and an all-zero result on an
+  empty table is indistinguishable from a no-op.
+
+**Tests:** `gdpr-self-delete.integration.mjs` S1–S12 (12/12, 0 skips);
+`advertiser-gdpr.integration.mjs` G1–G27 (25/27, 0 skips — the 2 are the documented G6/G8 aal2
+`is_money_admin()` baselines a local stack cannot satisfy). Zero regressions established two ways:
+isolated runs off a clean reset give `main` and the branch byte-identical failing-name sets; and on
+full parallel runs `main` itself yields 14 failures one run and 17 the next, its 17-run matching the
+branch exactly (`serving.integration` T3/T4/T5 are that pre-existing flake — in isolation that suite
+fails only its documented B1). **This is why the gate is the failing FILE list plus zero skips,
+never a count.**
+
+### Phases 4–5 — NOT STARTED
+
+- **Phase 4 (spec §4) — final payout on close.** One additive predicate inside
+  `payout_batch_reserve`'s existing loop so a *closing* publisher qualifies below the payout minimum:
+  `if v_payable < p_min_micros and rec.deletion_requested_at is null then continue`. It is the
+  **fifth** `CREATE OR REPLACE` of a money-path function — the body must be copied **verbatim** from
+  the live definer with only that predicate changed, following the precedent `20260722060000` set.
+  Transfer/confirm and the reservation lock are **not** touched. Depends on Phase 3's column.
+- **Phase 5 (spec §7) — portal surfaces.** Ships **last**, so the UI only ever exposes a working
+  flow. Separate Lovable repo (`~/projects/luma-line-edf7d51e`).
 
 ## 6. Deferral ledger
 
