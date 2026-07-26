@@ -30,6 +30,12 @@
 //   G18 — the DEPOSIT path (advertiser_deposit_self_id) resolves while live and refuses after erasure
 //   G19 — advertiser_data_export STILL WORKS after erasure (the Art. 15/20 over-gating guard)
 //   G20 — advertiser_writeoff_credit STILL WORKS after erasure (opt-in abandonment stays reachable)
+//   G21 — spend_down joins the disposition set; the pending watermark exists on BOTH roles
+//   G22 — spend_down defers erasure and deliberately KEEPS campaigns serving
+//   G23 — dormant with money in flight enters pending AND freezes serving
+//   G24 — the cron completes a pending deletion once the blocker clears; idempotent
+//   G25 — the cron holds a spend_down pending until the balance actually reaches zero
+//   G26 — cancel clears the watermark, unpauses, is self-scoped, and is refused after erasure
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -68,9 +74,15 @@ async function isStackUp() {
   try { const r = await fetch(`${REST_BASE}/`, { headers: { apikey: ANON }, signal: AbortSignal.timeout(2000) }); return r.status >= 200 && r.status < 500; } catch { return false; }
 }
 function psqlWorks() { try { return psql('select 1') === '1'; } catch { return false; } }
+// Presence of the FEATURE, not of one signature: Phase 3 (20260727100000) drops the no-argument
+// advertiser_gdpr_self_delete() in favour of advertiser_gdpr_self_delete(p_disposition text
+// default 'dormant'). Pinning this probe to one arity would silently SKIP the whole suite the
+// moment the signature moved — the worst possible failure mode for a money/GDPR suite.
 function migrationPresent() {
-  try { return psql("select to_regprocedure('public.advertiser_gdpr_self_delete()') is not null;") === 't'; }
-  catch { return false; }
+  try {
+    return psql(`select (to_regprocedure('public.advertiser_gdpr_self_delete()') is not null
+                      or to_regprocedure('public.advertiser_gdpr_self_delete(text)') is not null);`) === 't';
+  } catch { return false; }
 }
 
 const STACK_UP = await isStackUp();
@@ -406,17 +418,18 @@ test('G13 — writeoff is self-scoped: it cannot touch another org', { skip: SKI
     `select balance_micros from public.advertiser_balances where advertiser_id = '${A.advId}'`), '0');
 });
 
-test('G14 — disposition records why a balance was left behind, and rejects spend_down', { skip: SKIP }, () => {
+test('G14 — disposition records why a balance was left behind', { skip: SKIP }, () => {
   const A = seedAdvertiser({ balance: 40000000 });
 
   psql(`update public.advertisers set deletion_disposition = 'dormant' where id = '${A.advId}'`);
   assert.equal(psql(
     `select deletion_disposition from public.advertisers where id = '${A.advId}'`), 'dormant');
 
-  // spend_down is NOT accepted until Phase 3 ships the cron that honors it. psql() uses
-  // execFileSync, which throws on a nonzero exit, so a CHECK violation surfaces as a throw.
+  // Phase 3 (20260727100000) admits spend_down now that app.gdpr_complete_pending() honors it —
+  // see G21 for the full accepted set. Junk is still rejected: psql() uses execFileSync, which
+  // throws on a nonzero exit, so a CHECK violation surfaces as a throw.
   assert.throws(() => psql(
-    `update public.advertisers set deletion_disposition = 'spend_down' where id = '${A.advId}'`));
+    `update public.advertisers set deletion_disposition = 'junk' where id = '${A.advId}'`));
 });
 
 test('G15 — erasure is TERMINAL: an erased advertiser can neither be re-activated nor served', { skip: SKIP }, async () => {
@@ -740,4 +753,40 @@ test('G20 — advertiser_writeoff_credit STILL WORKS after erasure (opt-in aband
     'the post-erasure write-off keeps the ledger zero-sum');
   assert.equal(psql(`select count(*) from public.ledger_entries where entry_group_id='${wo.data.entry_group_id}' and account='platform_cash';`),
     '0', 'no cash leg on a write-off, erased or not');
+});
+
+// ---------------------------------------------------------------------------
+// G21-G26 — GDPR PHASE 3: the PENDING-DELETION state machine (20260727100000).
+//
+// A request that cannot complete immediately used to dead-end at {ok:false, reason} while the Art.
+// 12(3) one-month clock ran — the user had to come back and retry by hand. It now SCHEDULES itself:
+// a deletion_requested_at watermark, a freeze so the account does nothing new while pending, an
+// hourly cron that re-runs the SAME gate and completes the ones that now pass (delegating to the
+// UNCHANGED erasure body), and a cancel available right up until erasure fires.
+// ---------------------------------------------------------------------------
+
+test('G21 — spend_down is now an accepted disposition; junk still is not', { skip: SKIP }, () => {
+  const A = seedAdvertiser({ balance: 40000000 });
+
+  for (const d of ['dormant', 'writeoff', 'spend_down']) {
+    psql(`update public.advertisers set deletion_disposition = '${d}' where id = '${A.advId}'`);
+    assert.equal(psql(
+      `select deletion_disposition from public.advertisers where id = '${A.advId}'`), d);
+  }
+  assert.throws(() => psql(
+    `update public.advertisers set deletion_disposition = 'junk' where id = '${A.advId}'`));
+
+  // Both roles gain the pending watermark, nullable and null by default.
+  assert.equal(psql(
+    `select coalesce(deletion_requested_at::text, 'NULL') from public.advertisers where id = '${A.advId}'`), 'NULL');
+  const P = seedPublisher();
+  assert.equal(psql(
+    `select coalesce(deletion_requested_at::text, 'NULL') from public.publishers where id = '${P.pubId}'`), 'NULL');
+
+  // The watermark must NOT be a protected column — the erase/request paths run as `authenticated`
+  // and app.advertisers_protect_cols would raise 42501 if it guarded this.
+  psql(`update public.advertisers set deletion_requested_at = now() where id = '${A.advId}'`);
+  assert.notEqual(psql(
+    `select coalesce(deletion_requested_at::text, 'NULL') from public.advertisers where id = '${A.advId}'`), 'NULL');
+  psql(`update public.advertisers set deletion_requested_at = null, deletion_disposition = null where id = '${A.advId}'`);
 });
