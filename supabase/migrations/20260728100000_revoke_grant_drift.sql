@@ -11,17 +11,21 @@
 -- migrations (`supabase db reset`) reproduces the CORRECT, narrow ACLs. The migrations were always
 -- right; production acquired the extra privileges from somewhere else.
 --
--- ROOT CAUSE (as far as it can be established without touching prod): Supabase ships TWO
--- default-privilege entries for schema `public`, keyed by the role that CREATES the object:
+-- ROOT CAUSE — verified read-only against production, not inferred. Supabase ships TWO
+-- default-privilege entries for schema `public`, keyed by the role that CREATES the object, and on
+-- THIS project BOTH hand the public roles everything:
 --
 --   pg_default_acl: supabase_admin / public / r -> anon=arwdDxtm, authenticated=arwdDxtm
---   pg_default_acl: postgres       / public / r -> anon=Dxtm,     authenticated=Dxtm
+--   pg_default_acl: postgres       / public / r -> anon=arwdDxtm, authenticated=arwdDxtm
 --
--- Anything created (or re-granted) under `supabase_admin` — an older project's defaults, a
--- dashboard SQL-editor action, a Management-API apply — silently receives FULL DML for both
--- public roles. Under `postgres` it does not. This is the same class of footgun already recorded in
--- 20260629120000_secdef_grant_hardening.sql, where Supabase's default privileges auto-granted
--- `anon` EXECUTE on every new public function.
+-- (A local `supabase db reset` produces `Dxtm` for the postgres entry, which is why this is easy to
+-- get wrong from the local stack alone — prod and local disagree.)
+--
+-- All 35 relations in `public` on production are owned by **postgres**, so the postgres entry is the
+-- operative one: every table these migrations create is stamped from it. That is where the drift
+-- came from, and §4 below closes it. Same class of footgun as
+-- 20260629120000_secdef_grant_hardening.sql, where Supabase's default privileges auto-granted `anon`
+-- EXECUTE on every new public function — this is the table-privilege twin of it.
 --
 -- ---------------------------------------------------------------------------
 -- WHY IT MATTERS: SELF-SERVICE PAYOUT REDIRECTION
@@ -91,8 +95,32 @@
 -- from `{authenticated=w/postgres}` to NULL, and `has_column_privilege` flips to false. Without the
 -- re-grant, the publisher dashboard's profile edit silently breaks.
 --
--- The column-scoped SELECT on `public.advertisers` (20260716150000, which deliberately revoked
--- whole-table SELECT there) survives untouched because SELECT is not revoked below.
+-- The same trap applies to the column-scoped SELECT on `public.advertisers` (20260716150000, which
+-- deliberately revoked whole-table SELECT there to keep stripe_customer_id/is_house from clients):
+-- §3 revokes SELECT on that table, which cascades into all five column ACLs, so §3 re-grants them
+-- explicitly. Without that line the advertiser portal cannot read its own org at all.
+--
+-- ---------------------------------------------------------------------------
+-- SUPERSEDED NOTE — kept because the reasoning below is still half true
+-- ---------------------------------------------------------------------------
+-- An earlier revision of this file said the durable default-privilege fix could NOT be shipped
+-- here because it needs `supabase_admin`. That was wrong for THIS project, and §4 below now does
+-- ship it. Verified read-only against production:
+--
+--   * pg_default_acl carries entries for BOTH `postgres` AND `supabase_admin` on schema public,
+--     object type `r`, and on prod BOTH grant anon/authenticated the full `arwdDxtm`. The earlier
+--     claim that the `postgres` entry grants only `Dxtm` holds on a local stack, not on prod.
+--   * All 35 relations in `public` on production are owned by **postgres**, not supabase_admin.
+--
+-- So the operative default ACL — the one that actually stamps new tables here — is the `postgres`
+-- one, and `ALTER DEFAULT PRIVILEGES` with no FOR ROLE clause targets exactly that. It runs as
+-- `postgres` and therefore works both in `supabase db reset` and on the owner-gated prod deploy.
+--
+-- The `supabase_admin` entry still exists and still cannot be altered by `postgres`
+-- ("permission denied to change default privileges" — postgres is not a member). It only applies
+-- to objects CREATED BY supabase_admin, which nothing in this repo does. If a table is ever created
+-- through a path that runs as supabase_admin, it re-acquires the hole and §1-3 must be re-run;
+-- changing that entry needs Supabase support.
 --
 -- ---------------------------------------------------------------------------
 -- OWNER FOLLOW-UP (NOT done here)
@@ -176,3 +204,24 @@ from authenticated;
 -- REVOKE SELECT destroys the five column ACLs 20260716150000 established. Without this line the
 -- advertiser portal cannot read its own org at all.
 grant select (id, name, status, billing_mode, created_at) on public.advertisers to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 4. Stop the drift recurring: fix the DEFAULT privileges, not just today's tables.
+--
+-- Sections 1-3 correct the 35 relations that exist now. Without this section every table added
+-- later is stamped from pg_default_acl and silently re-acquires `arwdDxtm` for both public roles —
+-- the fix would decay from the day it lands.
+--
+-- No FOR ROLE clause: that targets the CURRENT role, `postgres`, which owns all 35 relations in
+-- `public` and is the role migrations apply as. That is the entry that actually stamps new tables
+-- here, and it is alterable (unlike the parallel supabase_admin entry, which is not, and which does
+-- not apply because supabase_admin creates nothing in this repo).
+--
+-- SELECT is revoked here too, matching §3: `main` grants reads explicitly per table, so a default
+-- read grant is exactly the implicit-permission shape this whole migration exists to remove. Every
+-- future table must state its own grants — explicit over implicit.
+--
+-- service_role is deliberately NOT named: it needs the default DML for the edge functions.
+-- ---------------------------------------------------------------------------
+alter default privileges in schema public
+  revoke insert, update, delete, truncate, select on tables from anon, authenticated;

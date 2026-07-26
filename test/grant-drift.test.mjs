@@ -210,6 +210,41 @@ test('D10 — whole-schema invariant: the client roles end exactly where main pu
   assert.match(out, /fixed anonR=0 anonW=0 authR=26 authW=2/);
 });
 
+test('D11 — the fix is durable: a NEW table is not stamped with the hole', { skip: SKIP }, () => {
+  // Sections 1-3 correct today's 35 relations. Without §4's ALTER DEFAULT PRIVILEGES, every table
+  // added later is stamped from pg_default_acl and silently re-acquires the drift — the fix would
+  // decay from the day it lands. Prove it by creating a table and reading its ACL.
+  //
+  // Precondition first: restore the production-shaped default, create a table under it, and show
+  // the new table really does come out wide open. Otherwise the "after" assertion proves nothing.
+  const out = psql(`
+    begin;
+    alter default privileges in schema public
+      grant insert, update, delete, truncate, select on tables to anon, authenticated;
+    create table public._drift_probe_before (id int);
+    select 'before: anonW=' ||
+      (has_table_privilege('anon','public._drift_probe_before','INSERT')
+       or has_table_privilege('anon','public._drift_probe_before','UPDATE'))::text
+      || ' anonR=' || has_table_privilege('anon','public._drift_probe_before','SELECT')::text;
+
+    alter default privileges in schema public
+      revoke insert, update, delete, truncate, select on tables from anon, authenticated;
+    create table public._drift_probe_after (id int);
+    select 'after: anonW=' ||
+      (has_table_privilege('anon','public._drift_probe_after','INSERT')
+       or has_table_privilege('anon','public._drift_probe_after','UPDATE'))::text
+      || ' anonR=' || has_table_privilege('anon','public._drift_probe_after','SELECT')::text
+      || ' authW=' ||
+      (has_table_privilege('authenticated','public._drift_probe_after','INSERT')
+       or has_table_privilege('authenticated','public._drift_probe_after','UPDATE'))::text
+      || ' authR=' || has_table_privilege('authenticated','public._drift_probe_after','SELECT')::text;
+    rollback;
+  `);
+
+  assert.match(out, /before: anonW=true anonR=true/, 'precondition: the drifted default must stamp new tables');
+  assert.match(out, /after: anonW=false anonR=false authW=false authR=false/);
+});
+
 test('D9 — advertisers: table read revoked, column-scoped read survives', { skip: SKIP }, () => {
   // 20260716150000 deliberately revoked whole-table SELECT and column-scoped it so
   // stripe_customer_id / is_house never reach a client. The table-level REVOKE cascades into
