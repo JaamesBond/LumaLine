@@ -7,10 +7,12 @@
 //   POST /advertiser-portal/funding/checkout   — auth advertiser (aal1): open a card-only Stripe
 //                                                 Checkout session for a prepay top-up. The depositing
 //                                                 advertiser is resolved SOLELY from the caller's JWT
-//                                                 (public.advertiser_self_id); a body advertiser_id is
-//                                                 IGNORED. A server-stored advertiser_topup_intents row
-//                                                 (keyed by the session id) is the authority for WHICH
-//                                                 advertiser the deposit credits — never event metadata.
+//                                                 (public.advertiser_deposit_self_id, which also
+//                                                 REFUSES an ERASED org — GDPR P2); a body
+//                                                 advertiser_id is IGNORED. A server-stored
+//                                                 advertiser_topup_intents row (keyed by the session
+//                                                 id) is the authority for WHICH advertiser the
+//                                                 deposit credits — never event metadata.
 //   POST /advertiser-portal/webhook            — UNAUTHENTICATED (Stripe signature IS the auth): raw-body
 //                                                 multi-secret verify + stripe_webhook_events dedup.
 //                                                 CREDIT only on checkout.session.completed with
@@ -22,7 +24,9 @@
 //   1. Signature verified over the RAW body (req.text(), never req.json() first), multi-secret.
 //   2. Deposits credited ONLY on a verified capture, resolving the advertiser from the server-stored
 //      topup_intent (NOT client/event metadata) — a checkout body carrying a foreign advertiser_id
-//      credits the caller's OWN balance, never the foreign one (advertiser_self_id is JWT-derived).
+//      credits the caller's OWN balance, never the foreign one (the resolver is JWT-derived).
+//      GDPR P2: an ERASED advertiser is refused at checkout, BEFORE any Stripe session exists — a
+//      post-capture refusal would strand a real charge with no credit (20260726120000 §2).
 //   3. Card-only Checkout (payment_method_types=['card']) — immediate capture, so a delayed/failed
 //      EUR method (SEPA) can never fund delivery before cash is captured (billing's card-only invariant).
 //   4. Idempotent: dedup on Stripe event id + UNIQUE(pi_id) (credit) / UNIQUE(dispute_id) (reversal)
@@ -104,17 +108,32 @@ function getStripe(): Stripe {
   return _stripe;
 }
 
-// Resolve the CALLER's own advertiser id from their JWT via public.advertiser_self_id (SECDEF).
-// forwardRpc runs it with the caller's bearer, so a client-passed advertiser_id can never influence
-// the result — the whole point (a foreign body id credits nothing). Returns null if not an advertiser.
-async function callerAdvertiserId(auth: string): Promise<string | null> {
-  const { status, text } = await forwardRpc("advertiser_self_id", {}, auth);
-  if (status !== 200) return null;
+// Resolve the CALLER's own advertiser id from their JWT via public.advertiser_deposit_self_id
+// (SECDEF). forwardRpc runs it with the caller's bearer, so a client-passed advertiser_id can never
+// influence the result — the whole point (a foreign body id credits nothing).
+//
+// GDPR P2: the deposit path resolves through advertiser_deposit_self_id, NOT advertiser_self_id.
+// The two differ only in that the deposit variant RAISES account_deleted (55000) once the org is
+// erased, so an erased account can never open a Checkout session and fund a balance that
+// structurally can never serve (window_open excludes deleted_at orgs). The rule lives in SQL
+// (20260726120000 §2) — this function only surfaces the database's refusal. advertiser_self_id
+// stays ungated for the read-only surfaces, which remain reachable after erasure.
+//
+// Returns the id, or a discriminated refusal: "none" (session maps to no org) / "erased".
+async function callerAdvertiserId(
+  auth: string,
+): Promise<{ id: string } | { refusal: "none" | "erased" }> {
+  const { status, text } = await forwardRpc("advertiser_deposit_self_id", {}, auth);
+  if (status !== 200) {
+    // The erased refusal must be distinguishable from "not an advertiser" — telling a data subject
+    // their deposit failed for an unrelated reason would be a worse answer than the truth.
+    return { refusal: /account_deleted/.test(text) ? "erased" : "none" };
+  }
   try {
     const v = JSON.parse(text);
-    return typeof v === "string" && v.length > 0 ? v : null;
+    return typeof v === "string" && v.length > 0 ? { id: v } : { refusal: "none" };
   } catch {
-    return null;
+    return { refusal: "none" };
   }
 }
 
@@ -260,8 +279,15 @@ Deno.serve(async (req) => {
 
     // The depositing advertiser is resolved SOLELY from the caller's JWT — a body advertiser_id is
     // ignored. Deposits are fine at aal1 (money moves Stripe-side; a foreign body id credits nothing).
-    const advertiserId = await callerAdvertiserId(auth);
-    if (!advertiserId) return jsonErr("No advertiser for this token", 403);
+    // The erasure gate is enforced by the RPC itself and refuses BEFORE the Stripe session is
+    // created, so an erased org is never charged for credit it could never spend.
+    const caller = await callerAdvertiserId(auth);
+    if ("refusal" in caller) {
+      return caller.refusal === "erased"
+        ? jsonErr("account_deleted: this advertiser account has been erased and can no longer be funded", 403)
+        : jsonErr("No advertiser for this token", 403);
+    }
+    const advertiserId = caller.id;
 
     let body: Record<string, unknown> = {};
     try { body = await req.json(); } catch { /* empty body ok */ }
