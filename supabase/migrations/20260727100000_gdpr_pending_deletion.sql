@@ -227,6 +227,8 @@ declare
   v_at        timestamptz;
   v_paused_li integer := 0;
   v_paused_cp integer := 0;
+  v_li_ids    uuid[]  := '{}';
+  v_cp_ids    uuid[]  := '{}';
 begin
   v_adv := (select app.current_advertiser_id());
   if v_adv is null then
@@ -274,6 +276,14 @@ begin
      where id = v_adv
     returning deletion_requested_at into v_at;
 
+    -- Logged with EMPTY freeze arrays: spend_down froze nothing, and cancel reads this record to
+    -- decide what to restore. Omitting the entry entirely would leave cancel unable to tell
+    -- "nothing was paused" from "the record is missing".
+    perform app.log_advertiser_action(v_adv, 'gdpr_pending', 'advertiser', v_adv,
+      jsonb_build_object('reason', 'spend_down', 'disposition', 'spend_down',
+                         'outstanding_micros', v_bal,
+                         'campaigns_paused', '[]'::jsonb, 'line_items_paused', '[]'::jsonb));
+
     return jsonb_build_object(
       'ok', true, 'state', 'pending', 'reason', 'spend_down',
       'advertiser_id', v_adv, 'requested_at', v_at,
@@ -304,17 +314,31 @@ begin
 
   -- Same shape as the erasure body's own pause, so a pending org stops serving exactly the way an
   -- erased one does. The self-serve resume RPCs are gated below, so this cannot be clicked away.
-  update public.line_items set status = 'paused'
-   where status = 'active'
-     and campaign_id in (select id from public.campaigns where advertiser_id = v_adv);
-  get diagnostics v_paused_li = row_count;
-  update public.campaigns set status = 'paused'
-   where advertiser_id = v_adv and status = 'active';
-  get diagnostics v_paused_cp = row_count;
+  --
+  -- The affected IDS are captured, not just counted. Cancel has to put back exactly what the
+  -- freeze took down: a blanket "unpause everything paused" would resurrect campaigns the
+  -- advertiser had deliberately stopped long before they ever asked to be deleted, and start
+  -- spending their money again. RETURNING into an array is the cheapest precise record available,
+  -- and advertiser_action_log is already the audit trail for this org.
+  with paused as (
+    update public.line_items set status = 'paused'
+     where status = 'active'
+       and campaign_id in (select id from public.campaigns where advertiser_id = v_adv)
+    returning id)
+  select coalesce(array_agg(id), '{}'::uuid[]) from paused into v_li_ids;
+  v_paused_li := coalesce(array_length(v_li_ids, 1), 0);
+
+  with paused as (
+    update public.campaigns set status = 'paused'
+     where advertiser_id = v_adv and status = 'active'
+    returning id)
+  select coalesce(array_agg(id), '{}'::uuid[]) from paused into v_cp_ids;
+  v_paused_cp := coalesce(array_length(v_cp_ids, 1), 0);
 
   perform app.log_advertiser_action(v_adv, 'gdpr_pending', 'advertiser', v_adv,
     jsonb_build_object('reason', v_reason, 'disposition', p_disposition,
-                       'campaigns_paused', v_paused_cp, 'line_items_paused', v_paused_li));
+                       'campaigns_paused',  to_jsonb(v_cp_ids),
+                       'line_items_paused', to_jsonb(v_li_ids)));
 
   return jsonb_build_object(
     'ok', true, 'state', 'pending', 'reason', v_reason,
@@ -745,6 +769,175 @@ begin
                               'public.device_code_redeem(text,text,text,text)'] loop
     if has_function_privilege('authenticated', v_fn, 'EXECUTE') then
       raise exception 'authenticated retains EXECUTE on % — REVOKE missing', v_fn;
+    end if;
+  end loop;
+end $$;
+
+-- ===========================================================================
+-- 7. Cancel — available right up until erasure fires, and not one moment after.
+--
+-- A pending deletion is the only reversible state in this whole area, and it must be reversible by
+-- the data subject alone: the freeze is real, so a user who changes their mind (or whose blocker
+-- turns out to take weeks) would otherwise be locked out of their own account with no self-serve
+-- way back. Both functions take NO argument — the target comes from the caller's own session, so
+-- neither can reach another account.
+--
+-- Once deleted_at is set there is nothing to cancel. Erasure is terminal (20260726110000): the
+-- personal data is already anonymized and the auth email already tombstoned, so "un-erasing" would
+-- be a resurrection these functions have no material to perform. Both return already_deleted.
+-- ===========================================================================
+
+create or replace function public.gdpr_cancel_deletion()
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_pid     uuid;
+  v_pub     public.publishers%rowtype;
+  v_revoked integer := 0;
+begin
+  v_pid := (select app.current_publisher_id());
+  if v_pid is null then
+    raise exception 'unauthenticated' using errcode = '28000';
+  end if;
+
+  select * into v_pub from public.publishers where id = v_pid for update;
+  if not found then
+    raise exception 'publisher not found' using errcode = 'P0002';
+  end if;
+  if v_pub.deleted_at is not null then
+    return jsonb_build_object('ok', false, 'reason', 'already_deleted');
+  end if;
+  if v_pub.deletion_requested_at is null then
+    return jsonb_build_object('ok', false, 'reason', 'not_pending');
+  end if;
+
+  update public.publishers set deletion_requested_at = null where id = v_pid;
+
+  -- Devices are deliberately NOT un-revoked. A revoked credential is revoked; silently reviving a
+  -- token the user had cause to consider destroyed is the wrong default, and the refresh-token
+  -- hashes stored against those rows are exactly the material an attacker would want restored.
+  -- The user re-authenticates with `lumaline login` and mints a fresh one — which the mint gate
+  -- above now permits again, because the watermark is clear. The payload says so explicitly so the
+  -- client can tell the user what to do next instead of leaving them staring at a dead CLI.
+  select count(*) into v_revoked
+    from public.devices where publisher_id = v_pid and revoked_at is not null;
+
+  return jsonb_build_object(
+    'ok',                    true,
+    'state',                 'cancelled',
+    'publisher_id',          v_pid,
+    'devices_still_revoked', v_revoked,
+    'next_step',             'run `lumaline login` to authorize a new device');
+end;
+$$;
+revoke all on function public.gdpr_cancel_deletion() from public, anon;
+grant  execute on function public.gdpr_cancel_deletion() to authenticated;
+
+comment on function public.gdpr_cancel_deletion is
+  'Cancels the caller''s OWN pending GDPR deletion (no argument — target derived from '
+  'app.current_publisher_id()). Clears deletion_requested_at, so the completion cron will not pick '
+  'the row up and the device-mint gate re-opens. Devices stay REVOKED by design; the returned '
+  'payload reports how many and tells the client to re-run login. Refuses with already_deleted '
+  'once erasure has fired (it is terminal) and not_pending when nothing is scheduled.';
+
+create or replace function public.advertiser_gdpr_cancel_deletion()
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_adv        uuid;
+  v_adv_row    public.advertisers%rowtype;
+  v_freeze     jsonb;
+  v_cp_ids     uuid[] := '{}';
+  v_li_ids     uuid[] := '{}';
+  v_resumed_cp integer := 0;
+  v_resumed_li integer := 0;
+begin
+  v_adv := (select app.current_advertiser_id());
+  if v_adv is null then
+    raise exception 'unauthenticated' using errcode = '28000';
+  end if;
+
+  select * into v_adv_row from public.advertisers where id = v_adv for update;
+  if not found then
+    raise exception 'advertiser not found' using errcode = 'P0002';
+  end if;
+  if v_adv_row.deleted_at is not null then
+    return jsonb_build_object('ok', false, 'reason', 'already_deleted');
+  end if;
+  if v_adv_row.deletion_requested_at is null then
+    return jsonb_build_object('ok', false, 'reason', 'not_pending');
+  end if;
+
+  -- Restore EXACTLY what the freeze paused, read back from the record it wrote. Anything the
+  -- advertiser had already paused before the request is absent from these arrays and stays paused:
+  -- cancel restores, it does not resurrect. A missing record (a row put into pending by hand)
+  -- restores nothing rather than guessing — under-restoring is recoverable with one click, while
+  -- over-restoring silently puts an ad back on air and starts spending the advertiser's money.
+  select l.payload into v_freeze
+    from public.advertiser_action_log l
+   where l.advertiser_id = v_adv and l.action = 'gdpr_pending'
+   order by l.at desc
+   limit 1;
+
+  if v_freeze is not null then
+    select coalesce(array_agg((e)::uuid), '{}'::uuid[]) into v_cp_ids
+      from jsonb_array_elements_text(coalesce(v_freeze->'campaigns_paused',  '[]'::jsonb)) e;
+    select coalesce(array_agg((e)::uuid), '{}'::uuid[]) into v_li_ids
+      from jsonb_array_elements_text(coalesce(v_freeze->'line_items_paused', '[]'::jsonb)) e;
+  end if;
+
+  update public.campaigns set status = 'active'
+   where advertiser_id = v_adv and status = 'paused' and id = any (v_cp_ids);
+  get diagnostics v_resumed_cp = row_count;
+
+  update public.line_items set status = 'active'
+   where status = 'paused' and id = any (v_li_ids)
+     and campaign_id in (select id from public.campaigns where advertiser_id = v_adv);
+  get diagnostics v_resumed_li = row_count;
+
+  -- The elected disposition goes with the request: it describes what is to become of a residual
+  -- balance AT erasure, and there is no longer an erasure for it to describe.
+  update public.advertisers
+     set deletion_requested_at = null, deletion_disposition = null
+   where id = v_adv;
+
+  perform app.log_advertiser_action(v_adv, 'gdpr_cancel', 'advertiser', v_adv,
+    jsonb_build_object('campaigns_resumed', v_resumed_cp, 'line_items_resumed', v_resumed_li));
+
+  return jsonb_build_object(
+    'ok', true, 'state', 'cancelled', 'advertiser_id', v_adv,
+    'campaigns_resumed', v_resumed_cp, 'line_items_resumed', v_resumed_li);
+end;
+$$;
+revoke all on function public.advertiser_gdpr_cancel_deletion() from public, anon;
+grant  execute on function public.advertiser_gdpr_cancel_deletion() to authenticated;
+
+comment on function public.advertiser_gdpr_cancel_deletion is
+  'Cancels the caller''s OWN pending GDPR deletion (no argument — target derived from '
+  'app.current_advertiser_id()). Clears deletion_requested_at + deletion_disposition and resumes '
+  'EXACTLY the campaigns/line_items the freeze paused, read back from the gdpr_pending '
+  'advertiser_action_log record — never a blanket unpause, which would resurrect campaigns the '
+  'advertiser had deliberately stopped and start spending their money again. Refuses with '
+  'already_deleted once erasure has fired (it is terminal) and not_pending when nothing is scheduled.';
+
+-- Migration-tail privilege assertion for the cancel pair.
+do $$
+declare
+  v_fn  text;
+  v_fns text[] := array['public.gdpr_cancel_deletion()', 'public.advertiser_gdpr_cancel_deletion()'];
+begin
+  foreach v_fn in array v_fns loop
+    if has_function_privilege('anon', v_fn, 'EXECUTE') then
+      raise exception 'anon retains EXECUTE on % — REVOKE ALL FROM PUBLIC, anon missing', v_fn;
+    end if;
+    if not has_function_privilege('authenticated', v_fn, 'EXECUTE') then
+      raise exception 'authenticated lost EXECUTE on % — the self-serve cancel is unreachable', v_fn;
     end if;
   end loop;
 end $$;

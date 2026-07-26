@@ -973,3 +973,71 @@ test('G26 — a pending row past 25 days raises the Art. 12(3) alert, and clears
   assert.equal(psql(`select count(*) from app.alert_events
      where check_name='gdpr_pending_overdue' and dedup_key='${key}' and status='resolved'`), '1');
 });
+
+test('G27 — cancel restores EXACTLY what the freeze paused, is self-scoped, and dies at erasure', { skip: SKIP }, async () => {
+  const A = seedAdvertiser({ balance: 0 });
+  const B = seedAdvertiser({ balance: 0 });
+
+  // A second campaign the advertiser had ALREADY paused of their own accord before ever asking to
+  // be deleted. Cancel must NOT resurrect it: a blanket "unpause everything" would silently put an
+  // advertiser's deliberately-stopped campaign back on air and start spending their money again.
+  const preId = randomUUID();
+  psql(`insert into public.campaigns (id, advertiser_id, name, status)
+        values ('${preId}','${A.advId}','pre-paused','paused')`);
+
+  psql(`insert into public.advertiser_topup_intents (checkout_session_id, advertiser_id, amount_micros, status)
+        values ('sess_p3x_${A.advId.slice(0,8)}','${A.advId}',10000000,'pending')`);
+  const req = await rpc('advertiser_gdpr_self_delete', {}, A.jwt);
+  assert.equal(req.data.state, 'pending', `precondition: ${JSON.stringify(req.data)}`);
+  assert.equal(psql(`select status from public.campaigns where id='${A.campId}'`), 'paused',
+    'precondition: the freeze really paused the live campaign');
+
+  const res = await rpc('advertiser_gdpr_cancel_deletion', {}, A.jwt);
+  assert.ok(res.ok, `cancel failed: ${res.status} ${JSON.stringify(res.data)}`);
+  assert.equal(res.data.ok, true);
+  assert.equal(res.data.state, 'cancelled');
+
+  assert.equal(psql(`select coalesce(deletion_requested_at::text,'NULL') from public.advertisers where id='${A.advId}'`),
+    'NULL', 'the watermark is cleared — the cron must never pick this row up again');
+  assert.equal(psql(`select coalesce(deletion_disposition,'NULL') from public.advertisers where id='${A.advId}'`),
+    'NULL', 'and the elected disposition goes with it');
+  assert.equal(psql(`select status from public.campaigns where id='${A.campId}'`), 'active',
+    'the campaign the freeze paused is restored');
+  assert.equal(psql(`select status from public.line_items where id='${A.liId}'`), 'active');
+  assert.equal(psql(`select status from public.campaigns where id='${preId}'`), 'paused',
+    'a campaign the ADVERTISER had already paused stays paused — cancel restores, it does not resurrect');
+
+  // The freeze is lifted at the gates too, not just in the data.
+  const resume = await rpc('advertiser_set_campaign_status', { p_id: A.campId, p_target: 'active' }, A.jwt);
+  assert.ok(resume.ok, `resume must work again after cancel: ${JSON.stringify(resume.data)}`);
+
+  // Nothing pending any more.
+  const twice = await rpc('advertiser_gdpr_cancel_deletion', {}, A.jwt);
+  assert.equal(twice.data.ok, false);
+  assert.equal(twice.data.reason, 'not_pending');
+
+  // Self-scoped: A's cancel could never have reached B. Prove B is untouched and independently
+  // cancellable, so "untouched" is not just "B was never pending in the first place".
+  psql(`insert into public.advertiser_topup_intents (checkout_session_id, advertiser_id, amount_micros, status)
+        values ('sess_p3y_${B.advId.slice(0,8)}','${B.advId}',10000000,'pending')`);
+  await rpc('advertiser_gdpr_self_delete', {}, B.jwt);
+  assert.ok(psql(`select deletion_requested_at from public.advertisers where id='${B.advId}'`).length > 0,
+    'B is pending');
+  await rpc('advertiser_gdpr_cancel_deletion', {}, A.jwt);
+  assert.ok(psql(`select deletion_requested_at from public.advertisers where id='${B.advId}'`).length > 0,
+    "A's cancel must not clear B's pending deletion");
+  assert.equal((await rpc('advertiser_gdpr_cancel_deletion', {}, B.jwt)).data.ok, true, 'B cancels its own');
+
+  // Cancel is available RIGHT UP UNTIL erasure fires — and not one moment after. A's deposit is
+  // still mid-flight from the top of this test, so settle it first: otherwise the request below
+  // would (correctly) defer again and never reach the state this half is about.
+  psql(`update public.advertiser_topup_intents set status='credited' where advertiser_id='${A.advId}'`);
+  const erased = await rpc('advertiser_gdpr_self_delete', {}, A.jwt);
+  assert.equal(erased.data.ok, true);
+  assert.equal(erased.data.state, 'erased', 'precondition: nothing blocks A any more, so it erases now');
+  const late = await rpc('advertiser_gdpr_cancel_deletion', {}, A.jwt);
+  assert.equal(late.data.ok, false);
+  assert.equal(late.data.reason, 'already_deleted', 'erasure is terminal — cancel cannot undo it');
+  assert.match(psql(`select name from public.advertisers where id='${A.advId}'`), /^deleted-/,
+    'the refused cancel left the anonymized name intact');
+});

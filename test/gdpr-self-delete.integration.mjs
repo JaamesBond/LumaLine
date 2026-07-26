@@ -362,3 +362,44 @@ test('S11: app.gdpr_complete_pending() erases a publisher once the payout settle
   sweep();
   assert.equal(psql(`select deleted_at from public.publishers where id='${P.pubId}';`), erasedAt);
 });
+
+test('S12: cancel clears the watermark and re-opens login, but does NOT un-revoke devices', { skip: SKIP }, async () => {
+  const P = seedPendingPublisher({ payoutInFlight: true });
+  const req = await rpcWithJwt('gdpr_self_delete', {}, P.jwt);
+  assert.equal(req.data?.state, 'pending', `precondition: ${JSON.stringify(req.data)}`);
+  assert.equal(liveDevices(P.pubId), '0', 'precondition: the freeze revoked the device');
+
+  const res = await rpcWithJwt('gdpr_cancel_deletion', {}, P.jwt);
+  assert.ok(res.ok, `cancel failed: ${res.status} ${JSON.stringify(res.data)}`);
+  assert.equal(res.data?.ok, true);
+  assert.equal(res.data?.state, 'cancelled');
+  assert.equal(psql(`select coalesce(deletion_requested_at::text,'NULL') from public.publishers where id='${P.pubId}';`),
+    'NULL', 'the cron must never pick this row up again');
+  assert.equal(psql(`select (deleted_at is null) from public.publishers where id='${P.pubId}';`), 't');
+
+  // Devices stay revoked BY DESIGN: a revoked credential is a revoked credential, and silently
+  // reviving one the user had cause to consider destroyed is the wrong default. The payload has to
+  // say so, or the CLI cannot tell the user what to do next.
+  assert.equal(liveDevices(P.pubId), '0', 'cancel must not un-revoke devices');
+  assert.ok(Number(res.data?.devices_still_revoked) >= 1, 'the payload reports the revoked devices');
+  assert.match(String(res.data?.next_step ?? ''), /login/i, 'and tells the client how to recover');
+
+  // ...and the way back IS open again: the mint gate is lifted, so the user can re-authenticate.
+  const hash = `p3cancel-${randomUUID()}`;
+  psql(`insert into public.device_auth_codes (device_code_hash, user_code, publisher_id, status, expires_at)
+        values ('${hash}', 'P3C${randomUUID().slice(0, 6).toUpperCase()}', '${P.pubId}', 'approved',
+                now() + interval '10 minutes');`);
+  const minted = JSON.parse(psql(`select public.device_code_redeem('${hash}', 'p3', '0.1.7', 'rt-${randomUUID()}')::text;`));
+  assert.equal(minted.status, 'approved', 'login works again after cancel');
+  assert.equal(liveDevices(P.pubId), '1', 'and the fresh device is live');
+
+  // Nothing pending any more.
+  const twice = await rpcWithJwt('gdpr_cancel_deletion', {}, P.jwt);
+  assert.equal(twice.data?.ok, false);
+  assert.equal(twice.data?.reason, 'not_pending');
+
+  // Cancel dies at erasure: A (module fixture) was erased back in S1.
+  const late = await rpcWithJwt('gdpr_cancel_deletion', {}, A_JWT);
+  assert.equal(late.data?.ok, false);
+  assert.equal(late.data?.reason, 'already_deleted', 'erasure is terminal — cancel cannot undo it');
+});
