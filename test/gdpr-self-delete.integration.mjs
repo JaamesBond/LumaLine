@@ -398,6 +398,15 @@ test('S12: cancel clears the watermark and re-opens login, but does NOT un-revok
   assert.equal(twice.data?.ok, false);
   assert.equal(twice.data?.reason, 'not_pending');
 
+  // And the cron must never come back for it, even once every blocker has cleared. A cancel the
+  // hourly pass then overrides is the worst outcome in this phase: an irreversible erasure of an
+  // account its owner just saved. (The cron also re-reads each row FOR UPDATE, covering the
+  // concurrent case this single-session assertion cannot reach.)
+  psql(`update public.payouts set status='paid' where publisher_id='${P.pubId}';`);
+  psql('select app.gdpr_complete_pending();');
+  assert.equal(psql(`select (deleted_at is null) from public.publishers where id='${P.pubId}';`), 't',
+    'a cancelled deletion must never be completed by the cron');
+
   // Cancel dies at erasure: A (module fixture) was erased back in S1.
   const late = await rpcWithJwt('gdpr_cancel_deletion', {}, A_JWT);
   assert.equal(late.data?.ok, false);

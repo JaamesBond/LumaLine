@@ -617,6 +617,7 @@ as $$
 declare
   r             record;
   v_res         jsonb;
+  v_disposition text;
   v_pub_erased  integer := 0;
   v_adv_erased  integer := 0;
   v_skipped     jsonb   := '[]'::jsonb;
@@ -635,6 +636,19 @@ begin
      limit p_limit
   loop
     begin
+      -- RE-READ UNDER LOCK. The scan above took no locks, so between it and here the user may have
+      -- cancelled. Without this the cron would erase — irreversibly — an account its owner had
+      -- just saved, because app.gdpr_erase_publisher only re-checks deleted_at, never the
+      -- watermark. The cancel holds this row's lock until it commits, so this blocks and then sees
+      -- the NULL. Re-checking a precondition under the lock that protects it is the only version
+      -- of this check that is worth anything.
+      perform 1 from public.publishers
+       where id = r.id and deletion_requested_at is not null and deleted_at is null
+         for update;
+      if not found then
+        continue;   -- cancelled (or already completed) since the scan
+      end if;
+
       v_res := app.gdpr_erase_publisher(r.id);
       if coalesce((v_res->>'ok')::boolean, false) then
         update public.publishers set deletion_requested_at = null where id = r.id;
@@ -650,7 +664,7 @@ begin
 
   -- --- advertisers --------------------------------------------------------------------------
   for r in
-    select a.id, a.deletion_disposition
+    select a.id
       from public.advertisers a
      where a.deletion_requested_at is not null
        and a.deleted_at is null
@@ -658,7 +672,18 @@ begin
      limit p_limit
   loop
     begin
-      if r.deletion_disposition = 'spend_down'
+      -- RE-READ UNDER LOCK — same cancel race as the publisher loop above, same reasoning. The
+      -- disposition is re-read here too, so a cancel-then-re-request that switched dormant for
+      -- spend_down is honoured rather than acted on from a stale scan.
+      select a.deletion_disposition into v_disposition
+        from public.advertisers a
+       where a.id = r.id and a.deletion_requested_at is not null and a.deleted_at is null
+         for update;
+      if not found then
+        continue;   -- cancelled (or already completed) since the scan
+      end if;
+
+      if v_disposition = 'spend_down'
          and exists (select 1 from public.advertiser_balances b
                       where b.advertiser_id = r.id
                         and (coalesce(b.balance_micros, 0) > 0 or coalesce(b.reserved_micros, 0) > 0)) then

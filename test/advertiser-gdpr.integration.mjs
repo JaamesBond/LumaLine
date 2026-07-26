@@ -1016,6 +1016,15 @@ test('G27 — cancel restores EXACTLY what the freeze paused, is self-scoped, an
   assert.equal(twice.data.ok, false);
   assert.equal(twice.data.reason, 'not_pending');
 
+  // And the cron must never come back for it. A cancel the hourly pass then overrides would be the
+  // worst outcome in this whole phase: an irreversible erasure of an account its owner just saved.
+  // (The cron additionally re-reads each row FOR UPDATE, which covers the concurrent case this
+  // single-session assertion cannot reach.)
+  psql(`update public.advertiser_topup_intents set status='credited' where advertiser_id='${A.advId}'`);
+  sweep();
+  assert.equal(psql(`select (deleted_at is null) from public.advertisers where id='${A.advId}'`), 't',
+    'a cancelled deletion must never be completed by the cron, even with every blocker cleared');
+
   // Self-scoped: A's cancel could never have reached B. Prove B is untouched and independently
   // cancellable, so "untouched" is not just "B was never pending in the first place".
   psql(`insert into public.advertiser_topup_intents (checkout_session_id, advertiser_id, amount_micros, status)
