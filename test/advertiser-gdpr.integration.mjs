@@ -794,6 +794,11 @@ test('G21 — spend_down is now an accepted disposition; junk still is not', { s
   assert.notEqual(psql(
     `select coalesce(deletion_requested_at::text, 'NULL') from public.advertisers where id = '${A.advId}'`), 'NULL');
   psql(`update public.advertisers set deletion_requested_at = null, deletion_disposition = null where id = '${A.advId}'`);
+
+  // This fixture is funded AND never erased, so its line stays serve-eligible for the rest of the
+  // run and competes for fills with the rotation-sensitive suites (serving.integration's clearing
+  // price and frequency cap). Same reason G15 does this — see stopServing's comment.
+  stopServing(A.advId);
 });
 
 test('G22 — spend_down defers erasure and deliberately KEEPS campaigns serving', { skip: SKIP }, async () => {
@@ -815,6 +820,11 @@ test('G22 — spend_down defers erasure and deliberately KEEPS campaigns serving
   assert.equal(psql(`select status from public.line_items where id='${A.liId}'`), 'active');
   assert.equal(psql(`select (deleted_at is null) from public.advertisers where id='${A.advId}'`), 't');
   assert.ok(psql(`select deletion_requested_at from public.advertisers where id='${A.advId}'`).length > 0);
+
+  // spend_down's whole point is that this org KEEPS serving — which means it stays in the global
+  // rotation, funded, for the remainder of the run. Pull it once the assertions are made, or it
+  // competes for fills with the rotation-sensitive suites. Same reason G15 does this.
+  stopServing(A.advId);
 });
 
 test('G23 — dormant with money in flight enters pending AND freezes serving', { skip: SKIP }, async () => {
@@ -859,6 +869,10 @@ test('G23 — dormant with money in flight enters pending AND freezes serving', 
     'the house advertiser must NOT be scheduled for a deletion that can never complete');
   assert.equal(psql(`select status from public.campaigns where id='${H.campId}'`), 'active',
     'and must NOT be frozen');
+
+  // H is left deliberately unfrozen by the assertion above, so it stays in the global rotation.
+  // Pull it, or it perturbs the auction the rotation-sensitive suites measure.
+  stopServing(H.advId);
 });
 
 // app.gdpr_complete_pending() is GLOBAL — it sweeps every pending row in the database, including
@@ -1049,4 +1063,9 @@ test('G27 — cancel restores EXACTLY what the freeze paused, is self-scoped, an
   assert.equal(late.data.reason, 'already_deleted', 'erasure is terminal — cancel cannot undo it');
   assert.match(psql(`select name from public.advertisers where id='${A.advId}'`), /^deleted-/,
     'the refused cancel left the anonymized name intact');
+
+  // B was cancelled, so its campaigns are back to active and it is in the rotation again. A is
+  // erased and structurally excluded, but pull both for symmetry — no test below needs either.
+  stopServing(A.advId);
+  stopServing(B.advId);
 });
