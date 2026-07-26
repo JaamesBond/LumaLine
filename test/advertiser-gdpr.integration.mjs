@@ -790,3 +790,68 @@ test('G21 — spend_down is now an accepted disposition; junk still is not', { s
     `select coalesce(deletion_requested_at::text, 'NULL') from public.advertisers where id = '${A.advId}'`), 'NULL');
   psql(`update public.advertisers set deletion_requested_at = null, deletion_disposition = null where id = '${A.advId}'`);
 });
+
+test('G22 — spend_down defers erasure and deliberately KEEPS campaigns serving', { skip: SKIP }, async () => {
+  // Phase 2 removed the idle-balance gate, so this advertiser would be erased IMMEDIATELY on a
+  // plain request. spend_down is therefore not a blocked outcome the cron rescues — it is a
+  // DELIBERATE election to defer, and the principal use of the pending state.
+  const A = seedAdvertiser({ balance: 40000000 });
+  assert.equal(psql(`select status from public.campaigns where id='${A.campId}'`), 'active',
+    'precondition: the campaign is live before the request');
+
+  const res = await rpc('advertiser_gdpr_self_delete', { p_disposition: 'spend_down' }, A.jwt);
+  assert.equal(res.data.ok, true, JSON.stringify(res.data));
+  assert.equal(res.data.state, 'pending');
+  assert.equal(res.data.reason, 'spend_down');
+  assert.equal(psql(`select deletion_disposition from public.advertisers where id='${A.advId}'`), 'spend_down');
+
+  // The ONE case where the freeze is skipped BY DESIGN — credit must stay spendable to spend down.
+  assert.equal(psql(`select status from public.campaigns where id='${A.campId}'`), 'active');
+  assert.equal(psql(`select status from public.line_items where id='${A.liId}'`), 'active');
+  assert.equal(psql(`select (deleted_at is null) from public.advertisers where id='${A.advId}'`), 't');
+  assert.ok(psql(`select deletion_requested_at from public.advertisers where id='${A.advId}'`).length > 0);
+});
+
+test('G23 — dormant with money in flight enters pending AND freezes serving', { skip: SKIP }, async () => {
+  const A = seedAdvertiser({ balance: 0 });
+  psql(`insert into public.advertiser_topup_intents (checkout_session_id, advertiser_id, amount_micros, status)
+        values ('sess_p3_${A.advId.slice(0,8)}','${A.advId}',10000000,'pending')`);
+  assert.equal(psql(`select status from public.campaigns where id='${A.campId}'`), 'active',
+    'precondition: the campaign is live before the request');
+
+  const res = await rpc('advertiser_gdpr_self_delete', {}, A.jwt);   // the no-arg form must still work
+  assert.equal(res.data.ok, true, JSON.stringify(res.data));
+  assert.equal(res.data.state, 'pending');
+  assert.equal(res.data.reason, 'topup_pending', 'the underlying money guard is unchanged');
+  assert.equal(psql(`select deletion_disposition from public.advertisers where id='${A.advId}'`), 'dormant');
+
+  assert.equal(psql(`select status from public.campaigns where id='${A.campId}'`), 'paused');
+  assert.equal(psql(`select status from public.line_items where id='${A.liId}'`), 'paused');
+  assert.equal(psql(`select (deleted_at is null) from public.advertisers where id='${A.advId}'`), 't');
+
+  // The freeze HOLDS: the self-serve resume RPCs must refuse while pending, or one click undoes it
+  // — the same defect class the erased-surface audit (20260726110000) closed one state later.
+  for (const [fn, id] of [['advertiser_set_campaign_status', A.campId], ['advertiser_set_line_item_status', A.liId]]) {
+    const resume = await rpc(fn, { p_id: id, p_target: 'active' }, A.jwt);
+    assert.ok(!resume.ok && resume.status >= 400, `${fn} must refuse a pending advertiser, got ${resume.status}`);
+    assert.match(JSON.stringify(resume.data ?? {}), /deletion_pending/, `${fn} must refuse with deletion_pending`);
+  }
+  assert.equal(psql(`select status from public.campaigns where id='${A.campId}'`), 'paused',
+    'the refused resume really did not write');
+
+  // A repeat request must not restart the Art. 12(3) clock.
+  const at = psql(`select deletion_requested_at from public.advertisers where id='${A.advId}'`);
+  await rpc('advertiser_gdpr_self_delete', {}, A.jwt);
+  assert.equal(psql(`select deletion_requested_at from public.advertisers where id='${A.advId}'`), at);
+
+  // ...and a terminal refusal must NEVER become a deferral: the house advertiser can never be
+  // erased, so scheduling one would freeze the sentinel identity forever.
+  const H = seedAdvertiser({ isHouse: true });
+  const house = await rpc('advertiser_gdpr_self_delete', {}, H.jwt);
+  assert.equal(house.data.ok, false, 'house_advertiser is terminal, not deferrable');
+  assert.equal(house.data.reason, 'house_advertiser');
+  assert.equal(psql(`select coalesce(deletion_requested_at::text,'NULL') from public.advertisers where id='${H.advId}'`), 'NULL',
+    'the house advertiser must NOT be scheduled for a deletion that can never complete');
+  assert.equal(psql(`select status from public.campaigns where id='${H.campId}'`), 'active',
+    'and must NOT be frozen');
+});
