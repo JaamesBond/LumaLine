@@ -332,3 +332,33 @@ test('S8: a session with no publisher row is rejected (unauthenticated)', { skip
   assert.ok(!res.ok, `expected an error for a publisher-less session, got ${res.status}: ${JSON.stringify(res.data)}`);
   assert.ok(res.status >= 400, `expected a 4xx/5xx, got ${res.status}`);
 });
+
+test('S11: app.gdpr_complete_pending() erases a publisher once the payout settles', { skip: SKIP }, async () => {
+  const P = seedPendingPublisher({ payoutInFlight: true });
+  const req = await rpcWithJwt('gdpr_self_delete', {}, P.jwt);
+  assert.equal(req.data?.state, 'pending', `precondition: the request must defer, got ${JSON.stringify(req.data)}`);
+
+  // STILL BLOCKED — the cron re-runs the SAME money gate. Without this half, the "it erased"
+  // assertion below would pass equally well against a cron that ignores the gate entirely.
+  const sweep = () => JSON.parse(psql('select app.gdpr_complete_pending()::text'));
+  sweep();
+  assert.equal(psql(`select (deleted_at is null) from public.publishers where id='${P.pubId}';`), 't',
+    'a payout still in flight must keep the deletion pending');
+
+  // The payout settles -> the next pass completes it via the UNCHANGED erasure body.
+  psql(`update public.payouts set status='paid' where publisher_id='${P.pubId}';`);
+  const out = sweep();
+  assert.ok(out.publishers_erased >= 1, `expected at least one erasure, got ${JSON.stringify(out)}`);
+  assert.equal(psql(`select (deleted_at is not null) from public.publishers where id='${P.pubId}';`), 't');
+  assert.match(psql(`select handle from public.publishers where id='${P.pubId}';`), /^deleted-/,
+    'the real erasure body ran — the handle is anonymized, not merely flagged');
+  assert.match(psql(`select email from auth.users where id='${P.authId}';`), /deleted/i,
+    'and the auth email is tombstoned, exactly as on the direct path');
+  assert.equal(psql(`select coalesce(deletion_requested_at::text,'NULL') from public.publishers where id='${P.pubId}';`),
+    'NULL', 'the watermark is cleared on completion');
+
+  // Idempotent: a further pass neither errors nor re-touches the row.
+  const erasedAt = psql(`select deleted_at from public.publishers where id='${P.pubId}';`);
+  sweep();
+  assert.equal(psql(`select deleted_at from public.publishers where id='${P.pubId}';`), erasedAt);
+});

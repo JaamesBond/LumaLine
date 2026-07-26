@@ -35,7 +35,8 @@
 //   G23 — dormant with money in flight enters pending AND freezes serving
 //   G24 — the cron completes a pending deletion once the blocker clears; idempotent
 //   G25 — the cron holds a spend_down pending until the balance actually reaches zero
-//   G26 — cancel clears the watermark, unpauses, is self-scoped, and is refused after erasure
+//   G26 — a pending row past 25 days raises the Art. 12(3) alert, and clears it on completion
+//   G27 — cancel clears the watermark, unpauses, is self-scoped, and is refused after erasure
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -220,6 +221,10 @@ function teardown() {
       parts.push(`delete from public.advertiser_balances where advertiser_id in (${advs});`);
       parts.push(`delete from public.advertiser_users where advertiser_id in (${advs});`);
       parts.push(`delete from public.advertisers where id in (${advs});`);
+    }
+    if (advs) {
+      parts.push(`delete from app.alert_events where check_name='gdpr_pending_overdue'
+                    and dedup_key in (${advIds.map((x) => `'advertiser:${x}'`).join(',')});`);
     }
     parts.push(`delete from app.admins where auth_user_id='${ADMIN.authId}';`);
     parts.push(`delete from auth.users where id in (${authIds.map((a) => `'${a}'`).join(',')});`);
@@ -854,4 +859,117 @@ test('G23 — dormant with money in flight enters pending AND freezes serving', 
     'the house advertiser must NOT be scheduled for a deletion that can never complete');
   assert.equal(psql(`select status from public.campaigns where id='${H.campId}'`), 'active',
     'and must NOT be frozen');
+});
+
+// app.gdpr_complete_pending() is GLOBAL — it sweeps every pending row in the database, including
+// ones parked by sibling tests (G22's spend_down org, G23's still-blocked one) and by other suites
+// running against the same stack. So every assertion below is about a SPECIFIC id, and the summary
+// counters are only ever asserted with >=. A test that pinned an exact global count would fail for
+// reasons that have nothing to do with the code under test.
+const sweep = () => JSON.parse(psql('select app.gdpr_complete_pending()::text'));
+
+test('G24 — the cron completes a pending deletion once the blocker clears', { skip: SKIP }, async () => {
+  const A = seedAdvertiser({ balance: 0 });
+  psql(`insert into public.advertiser_topup_intents (checkout_session_id, advertiser_id, amount_micros, status)
+        values ('sess_p3c_${A.advId.slice(0,8)}','${A.advId}',10000000,'pending')`);
+  const req = await rpc('advertiser_gdpr_self_delete', {}, A.jwt);
+  assert.equal(req.data.state, 'pending', `precondition: the request must defer, got ${JSON.stringify(req.data)}`);
+
+  // STILL BLOCKED — the cron must NOT erase yet. This half is what makes the test non-vacuous: an
+  // "it erased" assertion on the second half would pass just as well against a cron that ignores
+  // the gate entirely.
+  let out = sweep();
+  assert.equal(psql(`select (deleted_at is null) from public.advertisers where id='${A.advId}'`), 't',
+    'the cron must re-run the SAME gate, not blindly erase whatever is pending');
+  assert.ok(out.still_pending >= 1, 'and must report it as still pending');
+  assert.ok(psql(`select deletion_requested_at from public.advertisers where id='${A.advId}'`).length > 0,
+    'the watermark survives an unsuccessful pass');
+
+  // BLOCKER CLEARS -> the next pass completes it, through the UNCHANGED erasure body.
+  psql(`update public.advertiser_topup_intents set status='credited' where advertiser_id='${A.advId}'`);
+  out = sweep();
+  assert.ok(out.advertisers_erased >= 1, `expected at least one erasure, got ${JSON.stringify(out)}`);
+  assert.equal(psql(`select (deleted_at is not null) from public.advertisers where id='${A.advId}'`), 't');
+  assert.match(psql(`select name from public.advertisers where id='${A.advId}'`), /^deleted-/,
+    'the real erasure body ran — the name is anonymized, not merely flagged');
+  assert.equal(psql(`select coalesce(deletion_requested_at::text,'NULL') from public.advertisers where id='${A.advId}'`),
+    'NULL', 'the watermark is cleared on completion, so it only ever means "pending"');
+  assert.ok(Number(psql(`select count(*) from public.advertiser_action_log
+                          where advertiser_id='${A.advId}' and action='gdpr_erase'`)) >= 1,
+    'the completion is audited exactly like a direct erasure — same body, same log');
+
+  // IDEMPOTENT: a further pass must neither error nor touch this row again. Asserting the
+  // timestamp is unchanged is stronger than asserting a zero counter, and immune to a sibling
+  // suite completing its own row in the same pass.
+  const erasedAt = psql(`select deleted_at from public.advertisers where id='${A.advId}'`);
+  sweep();
+  assert.equal(psql(`select deleted_at from public.advertisers where id='${A.advId}'`), erasedAt,
+    'a completed row is never re-erased');
+});
+
+test('G25 — the cron holds a spend_down pending until the credit is actually exhausted', { skip: SKIP }, async () => {
+  const A = seedAdvertiser({ balance: 40000000 });
+  const req = await rpc('advertiser_gdpr_self_delete', { p_disposition: 'spend_down' }, A.jwt);
+  assert.equal(req.data.state, 'pending');
+
+  // PRECONDITION, proven live: nothing else blocks this org. Phase 2 removed the idle-balance gate,
+  // so the ONLY thing keeping it pending is the outstanding credit — which is exactly the claim.
+  assert.equal(psql(`select count(*) from public.advertiser_topup_intents
+                      where advertiser_id='${A.advId}' and status='pending'`), '0');
+  assert.equal(psql(`select count(*) from public.advertiser_charges
+                      where advertiser_id='${A.advId}' and status='pending'`), '0');
+
+  sweep();
+  assert.equal(psql(`select (deleted_at is null) from public.advertisers where id='${A.advId}'`), 't',
+    'credit outstanding — the cron must leave a spend_down pending');
+  assert.equal(psql(`select balance_micros from public.advertiser_balances where advertiser_id='${A.advId}'`),
+    '40000000', 'and must never sweep the balance itself as a side effect');
+
+  // Reserved credit is committed to open serve windows, so it is NOT spent down yet either.
+  psql(`update public.advertiser_balances set balance_micros = 0, reserved_micros = 15000000
+         where advertiser_id='${A.advId}'`);
+  sweep();
+  assert.equal(psql(`select (deleted_at is null) from public.advertisers where id='${A.advId}'`), 't',
+    'a zero balance with credit still RESERVED is not spent down — erasing there would strand a hold');
+
+  // Fully exhausted -> the next pass erases, and the disposition survives as the record of why.
+  psql(`update public.advertiser_balances set reserved_micros = 0 where advertiser_id='${A.advId}'`);
+  sweep();
+  assert.equal(psql(`select (deleted_at is not null) from public.advertisers where id='${A.advId}'`), 't');
+  assert.equal(psql(`select deletion_disposition from public.advertisers where id='${A.advId}'`), 'spend_down',
+    'the disposition is preserved past completion — it is the record of what became of the credit');
+});
+
+test('G26 — a pending row past 25 days raises the Art. 12(3) alert, and clears it on completion', { skip: SKIP }, async () => {
+  const A = seedAdvertiser({ balance: 0 });
+  psql(`insert into public.advertiser_topup_intents (checkout_session_id, advertiser_id, amount_micros, status)
+        values ('sess_p3a_${A.advId.slice(0,8)}','${A.advId}',10000000,'pending')`);
+  await rpc('advertiser_gdpr_self_delete', {}, A.jwt);
+
+  const key = `advertiser:${A.advId}`;
+  const openAlerts = () => psql(`select count(*) from app.alert_events
+     where check_name='gdpr_pending_overdue' and dedup_key='${key}' and status='open'`);
+
+  // PRECONDITION: a fresh request is NOT overdue. Without this half, an alert that fired
+  // unconditionally would pass the assertion below.
+  sweep();
+  assert.equal(openAlerts(), '0', 'a request made today must not be reported as overdue');
+
+  // Backdate past 25 days — Art. 12(3) gives one month, so the alert must fire with days to spare.
+  psql(`update public.advertisers set deletion_requested_at = now() - interval '26 days' where id='${A.advId}'`);
+  const out = sweep();
+  assert.ok(out.alerts_raised >= 1, `expected an overdue alert, got ${JSON.stringify(out)}`);
+  assert.equal(openAlerts(), '1');
+
+  // Deduped: a second pass must not spam a new row for the same subject every hour.
+  sweep();
+  assert.equal(openAlerts(), '1', 'the open-alert dedup index holds across passes');
+
+  // Completion resolves it — an alert nobody can clear is an alert everybody learns to ignore.
+  psql(`update public.advertiser_topup_intents set status='credited' where advertiser_id='${A.advId}'`);
+  sweep();
+  assert.equal(psql(`select (deleted_at is not null) from public.advertisers where id='${A.advId}'`), 't');
+  assert.equal(openAlerts(), '0', 'the alert resolves once the deletion actually completes');
+  assert.equal(psql(`select count(*) from app.alert_events
+     where check_name='gdpr_pending_overdue' and dedup_key='${key}' and status='resolved'`), '1');
 });

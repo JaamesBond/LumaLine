@@ -551,3 +551,200 @@ GRANT  EXECUTE ON FUNCTION public.advertiser_set_campaign_status(uuid, text) TO 
 
 COMMENT ON FUNCTION public.advertiser_set_campaign_status IS
   'Self-serve pause/resume of the caller''s own campaign (assert_owns_campaign FIRST); active<->paused only (draft→active is admin-approval-driven). A9: refuses resume while the advertiser is dispute-held. GDPR P2: refuses resume once the advertiser is erased (deleted_at set) — erasure is terminal. GDPR P3: refuses resume while a deletion is pending, unless the disposition is spend_down (which must keep serving). SECDEF; authenticated.';
+
+-- ===========================================================================
+-- 6. app.gdpr_complete_pending() — the hourly completion pass.
+--
+-- For every row that is pending and not yet erased, re-run the SAME gate by calling the SAME
+-- erasure body the request path calls. There is no second implementation of erasure anywhere in
+-- this phase, deliberately: two copies of that body is precisely how the ledger, refusal and
+-- anonymization invariants would drift apart, and they are the invariants that matter most.
+--
+-- PER-ROW ISOLATION. Each row's erasure runs inside its own BEGIN/EXCEPTION block, so one stuck
+-- account cannot abort the pass and strand every other data subject's deletion behind it. plpgsql
+-- implements that with a subtransaction, so a failed row rolls back cleanly on its own. Failures
+-- are REPORTED in the `skipped` array, never swallowed — a silently-dropped row would be a missed
+-- Art. 17 obligation that no one ever hears about. p_limit bounds the work per call; anything left
+-- over is picked up by the next hourly pass, and the overdue alert catches a row that never drains.
+--
+-- SPEND_DOWN needs one extra condition beyond the shared gate: the credit must actually be gone.
+-- Both balance_micros AND reserved_micros must be zero. reserved_micros is money already committed
+-- to open serve windows (window_open tests balance - reserved, so a reserve is a hold WITHIN the
+-- balance); erasing while a reserve is outstanding would strand a hold that
+-- app.advertiser_reconcile_reserved could later "self-heal" by releasing money that was never
+-- drawn. Reserves drain on their own via lumaline-sweep-windows, so this cannot deadlock — and if
+-- one ever did stick, the 25-day alert surfaces it to a human instead of erasing over it.
+--
+-- ART. 12(3): the controller must respond within ONE MONTH. A row still pending at 25 days raises
+-- app.alert_events, giving five days of margin. The insert/resolve pair mirrors
+-- public.monitor_sync_alerts (20260702010000:142-161) exactly, including the ON CONFLICT against
+-- the partial unique index on open (check_name, dedup_key) — so an hourly cron cannot spam a new
+-- row every hour, and an alert clears itself once the deletion completes. An alert nobody can
+-- clear is an alert everybody learns to ignore.
+-- ===========================================================================
+create or replace function app.gdpr_complete_pending(
+  p_overdue interval default interval '25 days',
+  p_limit   integer  default 500)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  r             record;
+  v_res         jsonb;
+  v_pub_erased  integer := 0;
+  v_adv_erased  integer := 0;
+  v_skipped     jsonb   := '[]'::jsonb;
+  v_pending_pub bigint  := 0;
+  v_pending_adv bigint  := 0;
+  v_raised      bigint  := 0;
+  v_resolved    bigint  := 0;
+begin
+  -- --- publishers ---------------------------------------------------------------------------
+  for r in
+    select p.id
+      from public.publishers p
+     where p.deletion_requested_at is not null
+       and p.deleted_at is null
+     order by p.deletion_requested_at
+     limit p_limit
+  loop
+    begin
+      v_res := app.gdpr_erase_publisher(r.id);
+      if coalesce((v_res->>'ok')::boolean, false) then
+        update public.publishers set deletion_requested_at = null where id = r.id;
+        v_pub_erased := v_pub_erased + 1;
+      end if;
+      -- Not ok: still blocked (or a refusal that is not a timing problem). Either way the row
+      -- stays pending and the overdue alert below is what escalates it to a human.
+    exception when others then
+      v_skipped := v_skipped || jsonb_build_object(
+        'role', 'publisher', 'id', r.id, 'sqlstate', sqlstate, 'error', sqlerrm);
+    end;
+  end loop;
+
+  -- --- advertisers --------------------------------------------------------------------------
+  for r in
+    select a.id, a.deletion_disposition
+      from public.advertisers a
+     where a.deletion_requested_at is not null
+       and a.deleted_at is null
+     order by a.deletion_requested_at
+     limit p_limit
+  loop
+    begin
+      if r.deletion_disposition = 'spend_down'
+         and exists (select 1 from public.advertiser_balances b
+                      where b.advertiser_id = r.id
+                        and (coalesce(b.balance_micros, 0) > 0 or coalesce(b.reserved_micros, 0) > 0)) then
+        null;   -- credit outstanding: still spending down, by the advertiser's own election
+      else
+        v_res := app.advertiser_gdpr_erase(r.id);
+        if coalesce((v_res->>'ok')::boolean, false) then
+          -- deletion_disposition is deliberately PRESERVED: it is the record of what became of
+          -- the residual credit, and is the only place that answer survives.
+          update public.advertisers set deletion_requested_at = null where id = r.id;
+          v_adv_erased := v_adv_erased + 1;
+        end if;
+      end if;
+    exception when others then
+      v_skipped := v_skipped || jsonb_build_object(
+        'role', 'advertiser', 'id', r.id, 'sqlstate', sqlstate, 'error', sqlerrm);
+    end;
+  end loop;
+
+  -- --- Art. 12(3) overdue alerts, computed AFTER the passes above ----------------------------
+  -- so a row completed in this very pass is neither alerted nor left holding a stale open alert.
+  with overdue as (
+    select 'publisher' as role, p.id::text as subject_id, p.deletion_requested_at as requested_at
+      from public.publishers p
+     where p.deletion_requested_at is not null
+       and p.deleted_at is null
+       and p.deletion_requested_at < now() - p_overdue
+    union all
+    select 'advertiser', a.id::text, a.deletion_requested_at
+      from public.advertisers a
+     where a.deletion_requested_at is not null
+       and a.deleted_at is null
+       and a.deletion_requested_at < now() - p_overdue
+  ), incoming as (
+    select o.role || ':' || o.subject_id as dedup_key,
+           jsonb_build_object(
+             'role', o.role, 'subject_id', o.subject_id,
+             'requested_at', o.requested_at,
+             'age_days', floor(extract(epoch from (now() - o.requested_at)) / 86400)) as payload
+      from overdue o
+  ), ins as (
+    insert into app.alert_events (check_name, severity, dedup_key, payload)
+    select 'gdpr_pending_overdue', 'high', i.dedup_key, i.payload from incoming i
+    on conflict (check_name, dedup_key) where status = 'open' do nothing
+    returning 1
+  ), res as (
+    update app.alert_events e
+       set status = 'resolved', resolved_at = now()
+     where e.check_name = 'gdpr_pending_overdue'
+       and e.status = 'open'
+       and not exists (select 1 from incoming i where i.dedup_key = e.dedup_key)
+    returning 1
+  )
+  select (select count(*) from ins), (select count(*) from res) into v_raised, v_resolved;
+
+  select count(*) into v_pending_pub from public.publishers
+   where deletion_requested_at is not null and deleted_at is null;
+  select count(*) into v_pending_adv from public.advertisers
+   where deletion_requested_at is not null and deleted_at is null;
+
+  return jsonb_build_object(
+    'publishers_erased',   v_pub_erased,
+    'advertisers_erased',  v_adv_erased,
+    'still_pending',       v_pending_pub + v_pending_adv,
+    'pending_publishers',  v_pending_pub,
+    'pending_advertisers', v_pending_adv,
+    'alerts_raised',       v_raised,
+    'alerts_resolved',     v_resolved,
+    'skipped',             v_skipped);
+end;
+$$;
+
+revoke all on function app.gdpr_complete_pending(interval, integer) from public, anon, authenticated;
+grant execute on function app.gdpr_complete_pending(interval, integer) to service_role;
+
+comment on function app.gdpr_complete_pending is
+  'Hourly completion pass for GDPR Phase 3 pending deletions. Re-runs the SAME gate by calling the '
+  'UNCHANGED app.gdpr_erase_publisher / app.advertiser_gdpr_erase — there is no second erasure '
+  'implementation. spend_down additionally requires balance_micros AND reserved_micros to be zero '
+  '(a reserve is a hold within the balance; erasing over one would strand it). Each row is '
+  'isolated in its own subtransaction so a single stuck account cannot block every other data '
+  'subject, and failures are REPORTED in `skipped`, never swallowed. Raises/resolves the '
+  'app.alert_events check gdpr_pending_overdue at 25 days, five days inside the Art. 12(3) '
+  'one-month deadline. service_role only; NOT scheduled by this migration — see '
+  'scripts/ops/pending-deletion-enable.sql.';
+
+-- Migration-tail privilege assertion — the anon-EXECUTE footgun reached production here once.
+do $$
+declare
+  v_fn  text;
+  v_fns text[] := array[
+    'app.gdpr_complete_pending(interval,integer)',
+    'app.gdpr_deferrable_reason(text)',
+    'public.gdpr_self_delete()',
+    'public.advertiser_gdpr_self_delete(text)',
+    'public.device_code_redeem(text,text,text,text)',
+    'public.advertiser_set_line_item_status(uuid,text)',
+    'public.advertiser_set_campaign_status(uuid,text)'];
+begin
+  foreach v_fn in array v_fns loop
+    if has_function_privilege('anon', v_fn, 'EXECUTE') then
+      raise exception 'anon retains EXECUTE on % — REVOKE ALL FROM PUBLIC, anon missing', v_fn;
+    end if;
+  end loop;
+  -- The two app.* helpers and the device-mint RPC must not be reachable by a logged-in user either.
+  foreach v_fn in array array['app.gdpr_complete_pending(interval,integer)',
+                              'app.gdpr_deferrable_reason(text)',
+                              'public.device_code_redeem(text,text,text,text)'] loop
+    if has_function_privilege('authenticated', v_fn, 'EXECUTE') then
+      raise exception 'authenticated retains EXECUTE on % — REVOKE missing', v_fn;
+    end if;
+  end loop;
+end $$;
