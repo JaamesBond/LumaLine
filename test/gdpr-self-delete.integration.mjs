@@ -18,8 +18,16 @@
 //   S4 — auth.users email is scrubbed (PII removed)
 //   S5 — idempotent (second call returns already_deleted)
 //   S6 — a bystander publisher B is completely untouched (no cross-publisher erasure)
-//   S7 — refuses while a payout is in flight (payout_in_flight), row NOT deleted
+//   S7 — a payout in flight defers erasure into PENDING (not a dead-end refusal), row NOT deleted
 //   S8 — an authenticated session with no publisher row is rejected (unauthenticated)
+//
+// GDPR PHASE 3 (20260727100000) — the pending-deletion state machine:
+//   S9  — a blocked request enters pending, freezes serving via device revocation, keeps
+//         status='active' (Phase 4's payout_batch_reserve needs it), and never restarts the
+//         Art. 12(3) clock on a repeat request
+//   S10 — the freeze holds: a pending publisher cannot mint a fresh device via the login flow
+//   S11 — app.gdpr_complete_pending() erases once the blocker clears; idempotent; non-vacuous
+//   S12 — cancel clears the watermark, re-opens login, and is refused after erasure
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -41,8 +49,12 @@ function mintJwt(sub, extra = {}) {
   return `${head}.${payload}.${sig}`;
 }
 
+// ON_ERROR_STOP=1 so a failing statement is a nonzero exit and execFileSync THROWS. Without it psql
+// prints the error, exits 0, and this helper cheerfully returns '' — every assertion downstream
+// then compares against an empty string instead of failing loudly.
 function psql(sql) {
-  return execFileSync('psql', [DB_URL, '-tAqc', sql], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+  return execFileSync('psql', [DB_URL, '-v', 'ON_ERROR_STOP=1', '-tAqc', sql],
+    { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
 }
 
 async function rpcWithJwt(fnName, body, jwt) {
@@ -99,6 +111,35 @@ function seedUser(id, email) {
       '${email}', '', now(), '{"provider":"email","providers":["email"]}', '{}', now(), now(), '', '', '', '');`);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 3 fixtures are created PER TEST (the A/B/C fixtures above are module-level and shared, so
+// they cannot carry per-test state like a device that must still exist at request time). Each one
+// is tracked here so teardown reaches it even if its test throws half-way through.
+// ---------------------------------------------------------------------------
+const extraPubIds = [];
+const extraAuthIds = [];
+
+// A publisher with a live (unrevoked) device, optionally with a payout in flight — the exact
+// precondition the pending path needs: something to freeze, and a reason to defer.
+function seedPendingPublisher({ payoutInFlight = false } = {}) {
+  const authId = randomUUID(), pubId = randomUUID(), deviceId = randomUUID();
+  const email = `self-p3-${authId}@example.com`;
+  seedUser(authId, email);
+  psql(`insert into public.publishers (id, auth_user_id, handle, country, stripe_account_id, status)
+    values ('${pubId}', '${authId}', 'p3-${pubId.slice(0, 8)}', 'FR', 'acct_p3_${pubId.slice(0,8)}', 'active');`);
+  psql(`insert into public.devices (id, publisher_id, label) values ('${deviceId}', '${pubId}', 'p3-device');`);
+  if (payoutInFlight) {
+    psql(`insert into public.payouts (id, publisher_id, amount_micros, status, hold_until, min_payout_micros)
+      values ('${randomUUID()}', '${pubId}', 1000000, 'pending', now(), 1000000);`);
+  }
+  extraPubIds.push(pubId);
+  extraAuthIds.push(authId);
+  return { authId, pubId, deviceId, email, jwt: mintJwt(authId) };
+}
+
+const liveDevices = (pubId) =>
+  psql(`select count(*) from public.devices where publisher_id='${pubId}' and revoked_at is null;`);
+
 function seedFixture() {
   // A — full chain.
   seedUser(A.authId, A.email);
@@ -137,6 +178,16 @@ function teardownFixture() {
     psql(`delete from public.payouts where publisher_id='${C.pubId}';`);
     psql(`delete from public.publishers where id in ('${A.pubId}','${B.pubId}','${C.pubId}');`);
     psql(`delete from auth.users where id in ('${A.authId}','${B.authId}','${C.authId}');`);
+  } catch { /* best-effort */ }
+  // Phase 3 per-test fixtures. Separate try so a failure above cannot strand them.
+  try {
+    if (!extraPubIds.length) return;
+    const pubs = extraPubIds.map((x) => `'${x}'`).join(',');
+    psql(`delete from public.payouts            where publisher_id in (${pubs});
+          delete from public.device_auth_codes  where publisher_id in (${pubs});
+          delete from public.devices            where publisher_id in (${pubs});
+          delete from public.publishers         where id in (${pubs});
+          delete from auth.users                where id in (${extraAuthIds.map((x) => `'${x}'`).join(',')});`);
   } catch { /* best-effort */ }
 }
 
@@ -198,16 +249,166 @@ test('S6: bystander publisher B is completely untouched', { skip: SKIP }, async 
   assert.equal(notDeleted, 'true', 'B deleted_at must remain null');
 });
 
-test('S7: refuses while a payout is in flight (payout_in_flight)', { skip: SKIP }, async () => {
+test('S7: a payout in flight DEFERS erasure into pending (Phase 3), never erasing early', { skip: SKIP }, async () => {
+  // Phase 3 (20260727100000) changed what happens when the gate refuses, NOT when it refuses. The
+  // money guard is byte-identical; the request now schedules itself instead of dead-ending at
+  // {ok:false} while the Art. 12(3) one-month clock runs.
   const res = await rpcWithJwt('gdpr_self_delete', {}, C_JWT);
-  assert.equal(res.data?.ok, false, 'must refuse while a payout is in flight');
-  assert.equal(res.data?.reason, 'payout_in_flight');
+  assert.equal(res.data?.ok, true, 'the request is ACCEPTED — a deferral is not a rejection');
+  assert.equal(res.data?.state, 'pending');
+  assert.equal(res.data?.reason, 'payout_in_flight', 'the underlying money guard is unchanged');
+
   const notDeleted = psql(`select (deleted_at is null) from public.publishers where id='${C.pubId}';`);
   assert.equal(notDeleted, 't', 'C must NOT be anonymized while money is in flight');
+  assert.ok(psql(`select deletion_requested_at from public.publishers where id='${C.pubId}';`).length > 0,
+    'the deferral is RECORDED — that is the whole point of Phase 3');
+});
+
+test('S9: a blocked request freezes serving, keeps status active, and never restarts the clock', { skip: SKIP }, async () => {
+  const P = seedPendingPublisher({ payoutInFlight: true });
+
+  // PRECONDITION, proven live: there is a usable device to freeze. A revocation assertion against
+  // a publisher that never had a device would pass on a no-op.
+  assert.equal(liveDevices(P.pubId), '1', 'precondition: the publisher has one live device');
+
+  const res = await rpcWithJwt('gdpr_self_delete', {}, P.jwt);
+  assert.equal(res.data?.ok, true);
+  assert.equal(res.data?.state, 'pending');
+  assert.equal(res.data?.reason, 'payout_in_flight');
+  assert.equal(res.data?.devices_revoked, 1, 'the freeze reports what it actually revoked');
+
+  // Watermark set, NOT erased, serving frozen through window_open's EXISTING d.revoked_at gate —
+  // no hot-path change was needed to stop serving.
+  const requestedAt = psql(`select deletion_requested_at from public.publishers where id='${P.pubId}';`);
+  assert.ok(requestedAt.length > 0, 'watermark set');
+  assert.equal(psql(`select (deleted_at is null) from public.publishers where id='${P.pubId}';`), 't');
+  assert.equal(liveDevices(P.pubId), '0', 'every device revoked — serving stops');
+
+  // status stays 'active'. Phase 4's payout_batch_reserve predicate requires
+  // (payout_status='verified' AND status='active' AND deleted_at IS NULL); freezing via `status`
+  // would block the very final payout that phase exists to deliver.
+  assert.equal(psql(`select status from public.publishers where id='${P.pubId}';`), 'active');
+
+  // A repeat request must NOT restart the Art. 12(3) one-month clock — otherwise a user who clicks
+  // twice silently grants us another month, and the 25-day alert never fires.
+  const again = await rpcWithJwt('gdpr_self_delete', {}, P.jwt);
+  assert.equal(again.data?.state, 'pending');
+  assert.equal(psql(`select deletion_requested_at from public.publishers where id='${P.pubId}';`), requestedAt,
+    'the original request timestamp is preserved verbatim across a repeat request');
+});
+
+test('S10: the freeze HOLDS — a pending publisher cannot mint a fresh device', { skip: SKIP }, async () => {
+  // Revoking devices is only a freeze if the account cannot immediately un-freeze itself. The sole
+  // device-mint point is public.device_code_redeem (the `lumaline login` device-code flow), so
+  // that is where the freeze has to bite. Without this, `lumaline login` undoes S9 in one command.
+  const P = seedPendingPublisher({ payoutInFlight: true });
+
+  // An APPROVED device-code grant, i.e. the user has already completed the browser half of the
+  // RFC 8628 flow. Redeeming it is the only way a device row is ever created.
+  const mint = () => {
+    const hash = `p3hash-${randomUUID()}`;
+    psql(`insert into public.device_auth_codes (device_code_hash, user_code, publisher_id, status, expires_at)
+          values ('${hash}', 'P3${randomUUID().slice(0, 6).toUpperCase()}', '${P.pubId}', 'approved',
+                  now() + interval '10 minutes');`);
+    return JSON.parse(psql(`select public.device_code_redeem('${hash}', 'p3', '0.1.7', 'rt-${randomUUID()}')::text;`));
+  };
+
+  // PRECONDITION, proven live: the mint flow really works for this publisher BEFORE the request.
+  assert.equal(mint().status, 'approved', 'precondition: device_code_redeem mints while live');
+  assert.equal(liveDevices(P.pubId), '2', 'precondition: the mint really did add a second device');
+
+  const req = await rpcWithJwt('gdpr_self_delete', {}, P.jwt);
+  assert.equal(req.data?.state, 'pending');
+  assert.equal(req.data?.devices_revoked, 2, 'both live devices revoked by the freeze');
+  assert.equal(liveDevices(P.pubId), '0');
+
+  // ...and the same grant flow now refuses, so the freeze cannot be undone by re-running `login`.
+  assert.equal(mint().status, 'deletion_pending', 'a pending publisher must not mint a fresh device');
+  assert.equal(liveDevices(P.pubId), '0', 'the refusal is REAL — no device row was written behind it');
 });
 
 test('S8: a session with no publisher row is rejected (unauthenticated)', { skip: SKIP }, async () => {
   const res = await rpcWithJwt('gdpr_self_delete', {}, ORPHAN_JWT);
   assert.ok(!res.ok, `expected an error for a publisher-less session, got ${res.status}: ${JSON.stringify(res.data)}`);
   assert.ok(res.status >= 400, `expected a 4xx/5xx, got ${res.status}`);
+});
+
+test('S11: app.gdpr_complete_pending() erases a publisher once the payout settles', { skip: SKIP }, async () => {
+  const P = seedPendingPublisher({ payoutInFlight: true });
+  const req = await rpcWithJwt('gdpr_self_delete', {}, P.jwt);
+  assert.equal(req.data?.state, 'pending', `precondition: the request must defer, got ${JSON.stringify(req.data)}`);
+
+  // STILL BLOCKED — the cron re-runs the SAME money gate. Without this half, the "it erased"
+  // assertion below would pass equally well against a cron that ignores the gate entirely.
+  const sweep = () => JSON.parse(psql('select app.gdpr_complete_pending()::text'));
+  sweep();
+  assert.equal(psql(`select (deleted_at is null) from public.publishers where id='${P.pubId}';`), 't',
+    'a payout still in flight must keep the deletion pending');
+
+  // The payout settles -> the next pass completes it via the UNCHANGED erasure body.
+  psql(`update public.payouts set status='paid' where publisher_id='${P.pubId}';`);
+  const out = sweep();
+  assert.ok(out.publishers_erased >= 1, `expected at least one erasure, got ${JSON.stringify(out)}`);
+  assert.equal(psql(`select (deleted_at is not null) from public.publishers where id='${P.pubId}';`), 't');
+  assert.match(psql(`select handle from public.publishers where id='${P.pubId}';`), /^deleted-/,
+    'the real erasure body ran — the handle is anonymized, not merely flagged');
+  assert.match(psql(`select email from auth.users where id='${P.authId}';`), /deleted/i,
+    'and the auth email is tombstoned, exactly as on the direct path');
+  assert.equal(psql(`select coalesce(deletion_requested_at::text,'NULL') from public.publishers where id='${P.pubId}';`),
+    'NULL', 'the watermark is cleared on completion');
+
+  // Idempotent: a further pass neither errors nor re-touches the row.
+  const erasedAt = psql(`select deleted_at from public.publishers where id='${P.pubId}';`);
+  sweep();
+  assert.equal(psql(`select deleted_at from public.publishers where id='${P.pubId}';`), erasedAt);
+});
+
+test('S12: cancel clears the watermark and re-opens login, but does NOT un-revoke devices', { skip: SKIP }, async () => {
+  const P = seedPendingPublisher({ payoutInFlight: true });
+  const req = await rpcWithJwt('gdpr_self_delete', {}, P.jwt);
+  assert.equal(req.data?.state, 'pending', `precondition: ${JSON.stringify(req.data)}`);
+  assert.equal(liveDevices(P.pubId), '0', 'precondition: the freeze revoked the device');
+
+  const res = await rpcWithJwt('gdpr_cancel_deletion', {}, P.jwt);
+  assert.ok(res.ok, `cancel failed: ${res.status} ${JSON.stringify(res.data)}`);
+  assert.equal(res.data?.ok, true);
+  assert.equal(res.data?.state, 'cancelled');
+  assert.equal(psql(`select coalesce(deletion_requested_at::text,'NULL') from public.publishers where id='${P.pubId}';`),
+    'NULL', 'the cron must never pick this row up again');
+  assert.equal(psql(`select (deleted_at is null) from public.publishers where id='${P.pubId}';`), 't');
+
+  // Devices stay revoked BY DESIGN: a revoked credential is a revoked credential, and silently
+  // reviving one the user had cause to consider destroyed is the wrong default. The payload has to
+  // say so, or the CLI cannot tell the user what to do next.
+  assert.equal(liveDevices(P.pubId), '0', 'cancel must not un-revoke devices');
+  assert.ok(Number(res.data?.devices_still_revoked) >= 1, 'the payload reports the revoked devices');
+  assert.match(String(res.data?.next_step ?? ''), /login/i, 'and tells the client how to recover');
+
+  // ...and the way back IS open again: the mint gate is lifted, so the user can re-authenticate.
+  const hash = `p3cancel-${randomUUID()}`;
+  psql(`insert into public.device_auth_codes (device_code_hash, user_code, publisher_id, status, expires_at)
+        values ('${hash}', 'P3C${randomUUID().slice(0, 6).toUpperCase()}', '${P.pubId}', 'approved',
+                now() + interval '10 minutes');`);
+  const minted = JSON.parse(psql(`select public.device_code_redeem('${hash}', 'p3', '0.1.7', 'rt-${randomUUID()}')::text;`));
+  assert.equal(minted.status, 'approved', 'login works again after cancel');
+  assert.equal(liveDevices(P.pubId), '1', 'and the fresh device is live');
+
+  // Nothing pending any more.
+  const twice = await rpcWithJwt('gdpr_cancel_deletion', {}, P.jwt);
+  assert.equal(twice.data?.ok, false);
+  assert.equal(twice.data?.reason, 'not_pending');
+
+  // And the cron must never come back for it, even once every blocker has cleared. A cancel the
+  // hourly pass then overrides is the worst outcome in this phase: an irreversible erasure of an
+  // account its owner just saved. (The cron also re-reads each row FOR UPDATE, covering the
+  // concurrent case this single-session assertion cannot reach.)
+  psql(`update public.payouts set status='paid' where publisher_id='${P.pubId}';`);
+  psql('select app.gdpr_complete_pending();');
+  assert.equal(psql(`select (deleted_at is null) from public.publishers where id='${P.pubId}';`), 't',
+    'a cancelled deletion must never be completed by the cron');
+
+  // Cancel dies at erasure: A (module fixture) was erased back in S1.
+  const late = await rpcWithJwt('gdpr_cancel_deletion', {}, A_JWT);
+  assert.equal(late.data?.ok, false);
+  assert.equal(late.data?.reason, 'already_deleted', 'erasure is terminal — cancel cannot undo it');
 });

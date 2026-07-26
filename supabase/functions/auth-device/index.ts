@@ -211,6 +211,10 @@ Deno.serve(async (req) => {
     if (status === "expired") return json({ error: "expired_token" }, 400);
     if (status === "denied") return json({ error: "access_denied" }, 400);
     if (status === "consumed") return json({ error: "expired_token" }, 400); // one-shot already used
+    // GDPR P3: the publisher has a deletion pending, so device_code_redeem refuses to mint a new
+    // session (the grant is left unconsumed). Surfaced distinctly so the CLI can say what actually
+    // happened; the generic fallthrough below would only say invalid_grant.
+    if (status === "deletion_pending") return json({ error: "deletion_pending" }, 403);
     if (status !== "approved") return json({ error: "invalid_grant" }, 400);
 
     let minted: { token: string; exp: number };
