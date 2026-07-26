@@ -1,6 +1,6 @@
 # LumaLine Publisher Terms of Service
 
-**Last updated:** 2026-07-26 · **Effective:** upon owner merge · **Status:** **v1.3** — replaces v1.2 (2026-07-23); sign-off act = owner merge of the PR containing this change. v1.3 changes, all **in your favour only**: (1) the payout minimum is **lowered from €25.00 to €1.00**, matching what the `lumaline` CLI and the README have always told publishers — the €25.00 figure in v1.0–v1.2 was never what the code enforced, and this corrects the Terms to the lower, promised number rather than the other way round; (2) §7.3 now guarantees that **closing your account waives the minimum entirely** — the whole remaining eligible balance is paid out, down to €0.01 (§4 and §10 updated to match); (3) new §7.9 states that a balance we cannot pay you is **never taken by us on closure and never expires** — it becomes ours only if you expressly write it off. Nothing else changed. v1.2 changes: production billing and payouts are **live** (the v1.1 test-mode notices are removed), and §7.7 payout coverage is extended beyond the EEA to the **US, UK, Canada, and Switzerland**.
+**Last updated:** 2026-07-26 · **Effective:** upon owner merge · **Status:** **v1.4** — replaces v1.3 (2026-07-26); sign-off act = owner merge of the PR containing this change. v1.4 changes, all **in your favour only**, following a UK + Canada legal review: (1) §7.9 no longer routes your limitation period through the Romanian choice of law in §14 — where your own country or province gives you **longer** than Romania's three years to claim an unpaid balance (England & Wales: six), **the longer period applies**; the previous wording read literally as importing Romanian law for everyone, which is the opposite of what was intended; (2) §7.9 adds that a **write-off election does not bind you** where your own mandatory consumer law says it cannot (UK CRA 2015 Part 2; Québec CPA non-waiver) — say so and the balance is restored in full; (3) §14 now states expressly that the Romanian choice of law **does not displace** the mandatory consumer protections of your home country or province, naming UK CRA s.74, Québec CCQ art. 3117 + CPA, and Rome I Art. 6. No change to payout amounts, timing, the split, or the €1.00 minimum. v1.3 changes, all **in your favour only**: (1) the payout minimum is **lowered from €25.00 to €1.00**, matching what the `lumaline` CLI and the README have always told publishers — the €25.00 figure in v1.0–v1.2 was never what the code enforced, and this corrects the Terms to the lower, promised number rather than the other way round; (2) §7.3 now guarantees that **closing your account waives the minimum entirely** — the whole remaining eligible balance is paid out, down to €0.01 (§4 and §10 updated to match); (3) new §7.9 states that a balance we cannot pay you is **never taken by us on closure and never expires** — it becomes ours only if you expressly write it off. Nothing else changed. v1.2 changes: production billing and payouts are **live** (the v1.1 test-mode notices are removed), and §7.7 payout coverage is extended beyond the EEA to the **US, UK, Canada, and Switzerland**.
 
 These Terms govern your participation as a **publisher** in LumaLine — the
 `lumaline` tool that shows a clearly-labeled, signed, sponsored line in the
@@ -175,8 +175,22 @@ bank account. They are operated through our payment processor, **Stripe**.
   you close, or later in writing. We do not operate an expiry clock: there is no
   period after which an unclaimed balance silently becomes ours.
 
-  Your right to claim it is subject to the ordinary limitation period under the
-  law applicable to you (§14), and nothing here shortens it.
+  **A write-off never binds you if your own law says it cannot.** Where the
+  mandatory consumer law of your country or province makes such an election
+  non-binding on you — for example the fairness rules in Part 2 of the UK
+  Consumer Rights Act 2015, or the non-waiver rules in Québec's Consumer
+  Protection Act — then it does not bind you. Tell us and we will restore the
+  balance in full.
+
+  Your right to claim the balance is subject to the ordinary limitation period
+  that applies to you, and **nothing in these Terms shortens it**. Where the
+  mandatory law of your country or province gives you a longer period than
+  Romanian law does, **the longer period is what applies**. Romanian law allows
+  three years; by way of example, England & Wales allows six years for a simple
+  contract (Limitation Act 1980), Québec three, and most other Canadian
+  provinces two from the point the claim was reasonably discoverable. This
+  paragraph is deliberately **not** governed by the choice of law in §14 — it is
+  the period your own law gives you, not ours.
 
   Where any applicable unclaimed-property or similar law requires us to report,
   remit or otherwise deal with a dormant balance, we will follow that law, using
@@ -250,6 +264,25 @@ Continued participation after an update means you accept the revised Terms.
 These Terms are governed by the laws of **Romania**, without regard to
 conflict-of-laws rules, and any disputes will be resolved in the courts of that
 jurisdiction (or as otherwise required by applicable consumer-protection law).
+
+**This choice of law does not take away protections your own law gives you.** If
+you are a consumer, it does not deprive you of the protection of the mandatory
+rules of the country or province where you habitually reside, and it does not
+override your right to bring proceedings in your local courts where your law
+gives you that right. In particular:
+
+- **United Kingdom** — you keep your rights under the Consumer Rights Act 2015,
+  including the unfair-terms rules in Part 2 and the protection in s.74 against
+  a choice of non-EEA law where the contract is closely connected with the UK.
+- **Canada** — you keep the mandatory consumer protections of your province.
+  In Québec this includes the Consumer Protection Act and art. 3117 of the Civil
+  Code of Québec; we do not rely on this clause against a Québec consumer.
+- **EEA** — you keep the mandatory protections of your country of residence
+  under Art. 6 of the Rome I Regulation.
+
+Where any term of these Terms conflicts with a mandatory protection of your own
+law, **your law wins and that term does not apply to you**; the rest of these
+Terms continue in force.
 
 ## 15. Contact
 
