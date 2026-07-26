@@ -8,9 +8,9 @@ settled + reconciled 2026-07-04** (§5d). All three self-serve dashboards **live
 2026-07-22** (§5g). Payouts reach **34 countries** (EEA + US/GB/CA/CH, §5h). Client `lumaline@0.1.7`
 = npm latest. **GDPR account-lifecycle Phases 1–3 merged AND fully deployed 2026-07-26** — `main`
 and prod are both at 75 migrations (§5i). **Open:** first REAL publisher payout (§5h note on RO
-law), issue #45 (integration suite vs the concurrent-open cap); and two deliberate non-deploys —
-`auth-device` still lacks the `deletion_pending` mapping (degrades safely) and the Phase 3
-completion cron is not yet scheduled (§5i).
+law), issue #45 (integration suite vs the concurrent-open cap). GDPR Phase 3 is **fully
+operational**: `auth-device` v21 deployed and the completion cron `lumaline-gdpr-complete-pending`
+scheduled hourly at `:23` (§5i).
 **Backend project:** Supabase `prmsonskzrubqsazmpwd` (the LumaLine project — **not** the unrelated CRM `kvlfpwzmjxuapjheknnj`).
 
 > **Security-audit hardening (2026-07-22, PR #39 — MERGED + DEPLOYED):**
@@ -757,17 +757,34 @@ returned `42501 permission denied` rather than `PGRST202 not found`, proving bot
 cache refreshed and that a `{}` body resolves unambiguously to the defaulted-parameter form.
 Runbook STEP 1 returned all zeroes with `skipped: []`.
 
-**Two things are deliberately still NOT done:**
+**✅ FULLY OPERATIONAL 2026-07-26.** Both follow-ups are done:
 
-1. **`auth-device` is not redeployed** — it still lacks the `deletion_pending` status mapping. Safe:
-   the RPC's new status falls through the edge function's existing `if (status !== "approved")`
-   branch to `invalid_grant`, which the CLI already treats as non-retryable. The freeze is enforced
-   in the database either way; only the error message is less specific.
-2. **The completion cron is not scheduled** — `app.gdpr_complete_pending()` exists and is reachable
-   but nothing calls it, so a pending deletion would sit until someone runs it. Scheduling is
-   `scripts/ops/pending-deletion-enable.sql` STEP 4 (hourly `23 * * * *`, verified free against
-   prod's live job set, which includes two jobs absent locally: `lumaline-monitor-hourly` at `:07`
-   and `lumaline-payout-weekly` Mondays 09:00).
+1. **`auth-device` redeployed, v20 → v21** (ACTIVE). It now maps the RPC's `deletion_pending` status
+   to a `403 deletion_pending` instead of letting it fall through to the generic `invalid_grant`.
+   Smoke-tested live: `POST /device/code` still returns 200 with a real `device_code`/`user_code`.
+2. **Completion cron scheduled** — `lumaline-gdpr-complete-pending`, `23 * * * *`, active.
+
+**STEP 2 rehearsal (run against production, rolled back).** The runbook's STEP 1 returns all zeroes
+on an empty table, which is indistinguishable from a no-op, so the pass was proven properly inside a
+transaction ending in `ROLLBACK`. It deviated from the runbook's literal text in one safe direction:
+instead of backdating a *real* advertiser, it created two **synthetic** ones, which proves the same
+thing about prod's schema/triggers/grants while making it impossible to erase a live customer even
+if the rollback had somehow been skipped. Both branches were exercised in a single pass —
+
+| Fixture | Setup | Result |
+|---|---|---|
+| REH-A | no blocker, requested 26 days ago | **erased**, name anonymized to `deleted-…`, watermark cleared, `deletion_disposition` preserved, campaign paused, **no alert** (correct — it stopped being pending before alerts are computed) |
+| REH-B | pending topup, requested 26 days ago | **stayed pending**, Art. 12(3) alert **raised** at severity `high` |
+
+Pass returned `advertisers_erased: 1, still_pending: 1, alerts_raised: 1, skipped: []`. Global
+`ledger_sum` was 0 before and after; **zero real advertisers erased and zero real rows left
+pending**. Post-rollback the database was verified pristine: no rehearsal rows, no intents, no
+alerts, no erased advertiser, ledger 0, both real campaigns still active.
+
+**Operational note.** The window between deploying the schema and scheduling the cron was not
+neutral, and is worth remembering for the next phase: once Phase 3 is deployed, a blocked erasure
+request **freezes** the account (revokes devices / pauses campaigns), and with no cron running
+nothing lifts that freeze except the user's own cancel. Deploy and schedule together.
 
 ### Phase 1 — retention sweep (PR #51, DEPLOYED + LIVE)
 
@@ -811,7 +828,7 @@ while `advertiser_data_export` and `advertiser_writeoff_credit` deliberately **s
 15/20 does not lapse because Art. 17 was exercised, and gating the write-off would trap the residual
 credit forever).
 
-### Phase 3 — pending-deletion state machine (PR #54, DEPLOYED 2026-07-26; cron not yet scheduled)
+### Phase 3 — pending-deletion state machine (PR #54, DEPLOYED + OPERATIONAL 2026-07-26)
 
 `20260727100000_gdpr_pending_deletion.sql` + `scripts/ops/pending-deletion-enable.sql`. The request
 path becomes **erase-or-enter-pending**; the money gate is byte-identical and both erasure bodies are
@@ -856,8 +873,9 @@ path becomes **erase-or-enter-pending**; the money gate is byte-identical and bo
   (ids recorded in the `gdpr_pending` action-log payload) — a blanket unpause would resurrect
   campaigns the advertiser had deliberately stopped and resume spending their money. Publisher cancel
   does **not** un-revoke devices; the payload reports `devices_still_revoked` + a `next_step`.
-- **Cron NOT scheduled by the migration.** `scripts/ops/pending-deletion-enable.sql`, hourly at
-  **`23 * * * *`** — free by construction against prod's jobs (`:00` clear-events, `:07`
+- **Cron not scheduled by the migration** (deliberate); enabled separately via
+  `scripts/ops/pending-deletion-enable.sql` and now **live on prod** as
+  `lumaline-gdpr-complete-pending`, hourly at **`23 * * * *`** — free by construction against prod's jobs (`:00` clear-events, `:07`
   monitor-hourly, `03:17`/`03:41`/`03:53` selfdeal/sybil/retention, plus the `*/2`, `*/5`, `*/10`
   jobs; 23 is odd and not a multiple of 5 or 10). Its STEP 2 is a **rehearsal inside a rolled-back
   transaction**, because on a fresh deploy STEP 1 returns all zeroes and an all-zero result on an
