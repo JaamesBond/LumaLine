@@ -29,6 +29,11 @@
 //   P15 — reserved amount is floored to whole cents; sub-cent remainder stays payable
 //   P16 — partial transfer.reversed books only the reversed amount (no over-credit)
 //   P17 — publisher_payable_micros sums cpva+cpc (M4 guard removed) — see 20260701090000_cpc_billing.sql
+//   P18 — GDPR Phase 4: the SAME below-minimum publisher is skipped while open and reserved once
+//         deletion_requested_at is set (the regular €25 minimum is unchanged for everyone else)
+//   P19 — a closing publisher on an unreleased payout hold is still skipped (closure ≠ hold bypass)
+//   P20 — a closing publisher who is unverified / has no Stripe account is still skipped
+//   P21 — a closing publisher below Stripe's one-cent floor reserves nothing (no €0 payout)
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -375,6 +380,127 @@ test('P17: publisher with mixed cpva+cpc cleared earnings is payable (guard remo
   addCpcEarning(pubId, 10_000_000, 8);    // matured CPC
   const payable = psql(`select app.publisher_payable_micros('${pubId}'::uuid, interval '7 days');`);
   assert.equal(payable, '40000000', 'payable = cpva + cpc');
+});
+
+// --- GDPR Phase 4: a closing account is paid everything -------------------------------
+//
+// 20260729100000_final_payout_on_close.sql lifts the below-minimum skip for a publisher carrying
+// publishers.deletion_requested_at (the Phase-3 closure marker), down to Stripe's one-cent floor.
+// EVERY other eligibility guard still applies to them — closure buys a lower minimum, nothing else.
+//
+// Each of these proves its own precondition live (marker state + a non-zero payable before the
+// call), then flips exactly ONE thing and re-runs the batch, so a green result cannot come from an
+// empty fixture or a publisher that was ineligible for some unrelated reason.
+
+/** Set the Phase-3 closure marker, and prove it took. */
+function markClosing(pubId) {
+  psql(`update public.publishers set deletion_requested_at = now() where id='${pubId}';`);
+  assert.notEqual(closingMarker(pubId), 'NULL', 'fixture must actually be marked as closing');
+}
+function closingMarker(pubId) {
+  return psql(`select coalesce(deletion_requested_at::text,'NULL') from public.publishers where id='${pubId}';`);
+}
+function payable(pubId) {
+  return Number(psql(`select app.publisher_payable_micros('${pubId}'::uuid, interval '7 days');`));
+}
+function payoutRows(pubId) {
+  const rows = psql(`select amount_micros||'|'||status from public.payouts where publisher_id='${pubId}' order by created_at;`);
+  return rows === '' ? [] : rows.split('\n');
+}
+/** The batch's verdict for one publisher: 'reserved' | the skip reason | undefined (not a candidate). */
+function verdict(res, pubId) {
+  const r = (res.data?.reserved || []).find((e) => e.publisher_id === pubId);
+  if (r) return 'reserved';
+  return (res.data?.skipped || []).find((e) => e.publisher_id === pubId)?.reason;
+}
+const reserve = (min = MIN) =>
+  rpc('payout_batch_reserve', { p_hold: HOLD, p_min_micros: min, p_velocity_max_micros: VEL, p_limit: LIM });
+
+test('P18: the closure marker is what lifts the minimum — same publisher, same balance', { skip: SKIP }, async () => {
+  const { pubId } = makeFull();
+  addEarning(pubId, 10);                       // 600_000 micros (€0.60) — far below the €25 minimum
+  assert.equal(closingMarker(pubId), 'NULL', 'precondition: publisher is NOT closing');
+  assert.equal(payable(pubId), PUB, 'precondition: a real, matured, below-minimum balance');
+  assert.ok(PUB < MIN, 'precondition: the fixture is genuinely below the regular minimum');
+
+  // 1. Not closing -> the regular €25 minimum still strands it. This must hold FIRST, or the
+  //    second half proves nothing.
+  const before = await reserve();
+  assert.equal(verdict(before, pubId), 'below_min', `open account must skip below_min: ${JSON.stringify(before.data)}`);
+  assert.deepEqual(payoutRows(pubId), [], 'open below-minimum account must not be reserved');
+
+  // 2. Flip ONLY the closure marker. Same publisher, same balance, same batch parameters.
+  markClosing(pubId);
+  assert.equal(payable(pubId), PUB, 'the marker must not change what is owed');
+
+  const after = await reserve();
+  assert.equal(verdict(after, pubId), 'reserved', `closing account must be reserved: ${JSON.stringify(after.data)}`);
+  assert.deepEqual(payoutRows(pubId), [`${PUB}|pending`], 'closing account is reserved for its FULL balance');
+});
+
+test('P19: a closing publisher on an unreleased payout hold is still skipped', { skip: SKIP }, async () => {
+  // Deliberately BELOW the minimum: that is the regime Phase 4 changed, so the hold is now the
+  // only thing standing between this publisher and a transfer.
+  const { pubId } = makeFull();
+  addEarning(pubId, 10);
+  markClosing(pubId);
+  psql(`insert into public.publisher_payout_holds (publisher_id, reason) values ('${pubId}','selfdeal_linkage');`);
+  const open = psql(`select count(*) from public.publisher_payout_holds where publisher_id='${pubId}' and released_at is null;`);
+  assert.equal(open, '1', 'precondition: exactly one UNRELEASED hold');
+  assert.equal(payable(pubId), PUB, 'precondition: a real matured balance');
+
+  const held = await reserve();
+  assert.equal(verdict(held, pubId), undefined, 'a held publisher is not even a candidate');
+  assert.deepEqual(payoutRows(pubId), [], 'closure must NOT bypass a fraud hold');
+
+  // Release the hold and nothing else — proves the hold was the blocker, not the fixture.
+  psql(`update public.publisher_payout_holds set released_at = now() where publisher_id='${pubId}';`);
+  const released = await reserve();
+  assert.equal(verdict(released, pubId), 'reserved', `released hold must reserve: ${JSON.stringify(released.data)}`);
+  assert.deepEqual(payoutRows(pubId), [`${PUB}|pending`], 'reserved once the hold is released');
+});
+
+test('P20: a closing publisher who is unverified / has no Stripe account is still skipped', { skip: SKIP }, async () => {
+  const a = makeFull({ verified: false });              // closing, but payout_status <> 'verified'
+  const b = makeFull({ verified: true, withAcct: false }); // closing, but no Stripe account
+  addEarning(a.pubId, 10); addEarning(b.pubId, 10);    // below the minimum — the Phase-4 regime
+  markClosing(a.pubId); markClosing(b.pubId);
+  assert.equal(psql(`select payout_status from public.publishers where id='${a.pubId}';`), 'none', 'precondition: unverified');
+  assert.equal(psql(`select coalesce(stripe_account_id,'NULL') from public.publishers where id='${b.pubId}';`), 'NULL', 'precondition: no acct');
+  assert.equal(payable(a.pubId), PUB, 'precondition: a owes a real balance');
+  assert.equal(payable(b.pubId), PUB, 'precondition: b owes a real balance');
+
+  await reserve();
+  assert.deepEqual(payoutRows(a.pubId), [], 'closing + unverified must not be reserved');
+  assert.deepEqual(payoutRows(b.pubId), [], 'closing + no Stripe account must not be reserved');
+
+  // Fix ONLY the ineligibility; both become payable — so the skips above were about eligibility,
+  // not about the closure path being dead.
+  psql(`update public.publishers set payout_status='verified' where id='${a.pubId}';`);
+  psql(`update public.publishers set stripe_account_id='acct_test_${b.pubId.slice(0, 8)}' where id='${b.pubId}';`);
+  const fixed = await reserve();
+  assert.equal(verdict(fixed, a.pubId), 'reserved', `a must reserve once verified: ${JSON.stringify(fixed.data)}`);
+  assert.equal(verdict(fixed, b.pubId), 'reserved', `b must reserve once it has an account: ${JSON.stringify(fixed.data)}`);
+});
+
+test('P21: a closing publisher below Stripe\'s one-cent floor reserves nothing (no €0 payout)', { skip: SKIP }, async () => {
+  // payouts.amount_micros CHECK is (>= 0), so without the floor this would book a €0.00 pending
+  // payout and a Stripe transfer that can never succeed.
+  const { pubId } = makeFull();
+  addEarningMicros(pubId, 5_000, 10);   // €0.005 — real money owed, but it floors to ZERO cents
+  markClosing(pubId);
+  assert.equal(payable(pubId), 5_000, 'precondition: a real, non-zero, sub-cent balance');
+
+  const sub = await reserve();
+  assert.equal(verdict(sub, pubId), 'below_min', `sub-cent closing balance must skip: ${JSON.stringify(sub.data)}`);
+  assert.deepEqual(payoutRows(pubId), [], 'must not create a €0 payout');
+
+  // Cross the floor by one cent's worth and nothing else — the boundary is exactly one cent.
+  addEarningMicros(pubId, 6_000, 10);   // total 11_000 -> floors to 10_000 (€0.01)
+  assert.equal(payable(pubId), 11_000, 'precondition: now just over the one-cent floor');
+  const over = await reserve();
+  assert.equal(verdict(over, pubId), 'reserved', `€0.01 closing balance must reserve: ${JSON.stringify(over.data)}`);
+  assert.deepEqual(payoutRows(pubId), ['10000|pending'], 'reserved for exactly one whole cent');
 });
 
 test('P11: money RPCs are service-role-only (anon/authenticated blocked)', { skip: SKIP }, async () => {

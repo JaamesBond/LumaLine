@@ -1,6 +1,6 @@
 # LumaLine Publisher Terms of Service
 
-**Last updated:** 2026-07-23 · **Effective:** upon owner merge · **Status:** **v1.2** — replaces v1.1 (2026-07-01); sign-off act = owner merge of the PR containing this change. v1.2 changes: production billing and payouts are **live** (the v1.1 test-mode notices are removed), and §7.7 payout coverage is extended beyond the EEA to the **US, UK, Canada, and Switzerland**.
+**Last updated:** 2026-07-26 · **Effective:** upon owner merge · **Status:** **v1.3** — replaces v1.2 (2026-07-23); sign-off act = owner merge of the PR containing this change. v1.3 changes: §7.3 now guarantees that **closing your account waives the €25.00 payout minimum** — the whole remaining eligible balance is paid out, down to €0.01 (§4 and §10 updated to match). This is a change **in your favour only**; nothing else changed. v1.2 changes: production billing and payouts are **live** (the v1.1 test-mode notices are removed), and §7.7 payout coverage is extended beyond the EEA to the **US, UK, Canada, and Switzerland**.
 
 These Terms govern your participation as a **publisher** in LumaLine — the
 `lumaline` tool that shows a clearly-labeled, signed, sponsored line in the
@@ -79,7 +79,8 @@ This section is important — please read it carefully.
   views from a logged-in, active device accrue.
 - **Currency and minimums.** Earnings are tracked in micro-EUR. A minimum payout
   threshold of **€25.00** applies (see §7); balances below the minimum carry
-  forward.
+  forward, and are paid in full — minimum waived — if you close your account
+  (§7.3).
 - **Taxes.** You are responsible for any taxes on amounts you receive, and for
   providing any tax information we (or our payment processor) are required to
   collect (see §7).
@@ -121,9 +122,19 @@ bank account. They are operated through our payment processor, **Stripe**.
   verification succeeds. You are responsible for any taxes on amounts you receive
   and for providing tax information that we or Stripe are required to collect. We
   may withhold amounts where required by law.
-- **7.3 Minimum and schedule.** The minimum payout is **€25.00**. Eligible
-  balances at or above the minimum are paid on a periodic batch; a balance below
-  the minimum **carries forward** to a later batch until it reaches the minimum.
+- **7.3 Minimum, schedule, and account closure.** The minimum payout is
+  **€25.00**. Eligible balances at or above the minimum are paid on a periodic
+  batch; a balance below the minimum **carries forward** to a later batch until it
+  reaches the minimum. The minimum exists so that a batch does not fire a stream
+  of tiny transfers — it is not a way for us to keep your money, and **closing
+  your account cancels it**: when you request account closure (§10), your **whole
+  remaining eligible balance is paid out regardless of the €25.00 minimum**, down
+  to the smallest amount Stripe can transfer (**€0.01**). A balance you have
+  carried forward is never forfeited by leaving. Every other payout condition in
+  this section still applies to that final payout, unchanged — the hold period
+  (§7.4), Stripe onboarding and KYC (§7.1–§7.2), a supported country (§7.7), and
+  any fraud or velocity review (§7.5). Closing your account does not release a
+  payout that is under review.
 - **7.4 Hold period (always longer than the clawback window).** A cleared
   earning becomes **payable only after a hold period that is strictly longer
   than the 72-hour clawback window** — currently **7 days** from the underlying
@@ -186,10 +197,11 @@ You are always in control:
 - `lumaline uninstall` removes the status-line wiring and restores your prior
   Claude Code configuration.
 - You may request closure of your account and deletion of your data as described
-  in the [Privacy Policy](./privacy-policy.md). We may retain the minimum records
-  required by law (e.g. ledger entries for accounting); see the Privacy Policy
-  for how deletion preserves financial-ledger integrity while removing your
-  personal data.
+  in the [Privacy Policy](./privacy-policy.md). **Whatever you have earned is paid
+  out to you — the €25.00 minimum does not apply to a closing account** (§7.3). We
+  may retain the minimum records required by law (e.g. ledger entries for
+  accounting); see the Privacy Policy for how deletion preserves financial-ledger
+  integrity while removing your personal data.
 
 ## 11. No warranty
 

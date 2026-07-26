@@ -108,9 +108,13 @@ account/device IDs — never your email, code, or any content. See the
    or run `lumaline connect`. Both open Stripe's hosted onboarding. **Payouts reach bank accounts
    in the EEA, US, UK, Canada, and Switzerland** (EUR ledger; non-euro accounts receive
    Stripe-converted local currency).
-3. **Get paid automatically** — a weekly payout run pays every verified balance of **€1 or more**.
-   Earnings become payable after a **7-day hold** — deliberately longer than the 72h clawback
-   window, so money that reaches your bank can never be clawed back.
+3. **Get paid automatically** — a weekly payout run pays every verified balance of **€25 or more**;
+   below that it carries forward, so you never get a batch of 30-cent transfers. Earnings become
+   payable after a **7-day hold** — deliberately longer than the 72h clawback window, so money that
+   reaches your bank can never be clawed back.
+4. **Leaving? You get paid anyway** — close your account and the **€25 minimum is waived**: whatever
+   you've earned is paid out in full, down to the smallest amount Stripe can transfer (€0.01). We
+   never keep your earnings.
 
 `install` is the **only** thing that touches your Claude Code settings, and only when *you* run
 it — never automatically on `npm install`. It backs up `~/.claude/settings.json` first and
