@@ -1,7 +1,13 @@
 # LumaLine Advertiser Terms of Service
 
-**Last updated:** 2026-07-25 · **Effective:** upon owner merge · **Status:** v2.1 — replaces v2.0
-(2026-07-23) and v1.0 (2026-07-02); sign-off act = owner merge of the PR containing this change
+**Last updated:** 2026-07-26 · **Effective:** upon owner merge · **Status:** v2.2 — replaces v2.1
+(2026-07-25), v2.0 (2026-07-23) and v1.0 (2026-07-02); sign-off act = owner merge of the PR
+containing this change
+
+> **v2.2 change (2026-07-26):** §3.1 now states expressly that ad credit **never expires** and
+> carries **no dormancy, inactivity, maintenance or service fee**. This is a commitment we were
+> already keeping — no such fee or expiry has ever existed — written down. **In your favour only**;
+> it removes an option we had never used and now cannot use.
 
 > **v2.1 change (2026-07-25):** §3.1 and §9 previously stated that unused prepaid ad credit is
 > *forfeited when your account closes*. It now says forfeiture requires the advertiser's **explicit
@@ -95,6 +101,12 @@ Self-serve advertising on LumaLine is funded by **prepaid ad credit**:
   a data-protection right conditional on giving up funds.
 - **Deliberate over-deposit is your risk:** deposit amounts are chosen by you;
   deposit only what you intend to spend.
+- **No expiry, no dormancy fees:** ad credit **never expires**. We charge **no
+  inactivity, dormancy, maintenance or service fee** against it, and it is not
+  reduced by the passage of time. Credit is usable only for advertising on
+  LumaLine and is never redeemable for cash — so an unused balance simply stays
+  available to spend until you spend it, write it off (above), or we terminate
+  your account for breach (§9).
 - **Chargebacks are a breach:** Because ad credit is contractually
   non-refundable, initiating a card dispute or chargeback against a deposit
   (other than for genuine unauthorized use of your card) is a material breach

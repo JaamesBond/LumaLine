@@ -1,6 +1,6 @@
 # LumaLine Publisher Terms of Service
 
-**Last updated:** 2026-07-26 · **Effective:** upon owner merge · **Status:** **v1.3** — replaces v1.2 (2026-07-23); sign-off act = owner merge of the PR containing this change. v1.3 changes, both **in your favour only**: (1) the payout minimum is **lowered from €25.00 to €1.00**, matching what the `lumaline` CLI and the README have always told publishers — the €25.00 figure in v1.0–v1.2 was never what the code enforced, and this corrects the Terms to the lower, promised number rather than the other way round; (2) §7.3 now guarantees that **closing your account waives the minimum entirely** — the whole remaining eligible balance is paid out, down to €0.01 (§4 and §10 updated to match). Nothing else changed. v1.2 changes: production billing and payouts are **live** (the v1.1 test-mode notices are removed), and §7.7 payout coverage is extended beyond the EEA to the **US, UK, Canada, and Switzerland**.
+**Last updated:** 2026-07-26 · **Effective:** upon owner merge · **Status:** **v1.3** — replaces v1.2 (2026-07-23); sign-off act = owner merge of the PR containing this change. v1.3 changes, all **in your favour only**: (1) the payout minimum is **lowered from €25.00 to €1.00**, matching what the `lumaline` CLI and the README have always told publishers — the €25.00 figure in v1.0–v1.2 was never what the code enforced, and this corrects the Terms to the lower, promised number rather than the other way round; (2) §7.3 now guarantees that **closing your account waives the minimum entirely** — the whole remaining eligible balance is paid out, down to €0.01 (§4 and §10 updated to match); (3) new §7.9 states that a balance we cannot pay you is **never taken by us on closure and never expires** — it becomes ours only if you expressly write it off. Nothing else changed. v1.2 changes: production billing and payouts are **live** (the v1.1 test-mode notices are removed), and §7.7 payout coverage is extended beyond the EEA to the **US, UK, Canada, and Switzerland**.
 
 These Terms govern your participation as a **publisher** in LumaLine — the
 `lumaline` tool that shows a clearly-labeled, signed, sponsored line in the
@@ -166,6 +166,21 @@ bank account. They are operated through our payment processor, **Stripe**.
   processor fees are handled by Stripe and may apply. If a transfer fails or is
   returned (for example, a closed bank account), the amount is **restored to
   your balance** for a later retry once you correct the issue.
+- **7.9 Unclaimed balances.** If you close your account (§10) while holding a
+  balance we cannot pay — most commonly because you never completed Stripe
+  onboarding, so there is no account to send it to — we do **not** take it. Your
+  personal data is erased as you asked, and the balance stays recorded against
+  your (now anonymised) ledger entry as money we owe. **It becomes ours only if
+  you expressly tell us to write it off**, in a separate confirmation at the time
+  you close, or later in writing. We do not operate an expiry clock: there is no
+  period after which an unclaimed balance silently becomes ours.
+
+  Your right to claim it is subject to the ordinary limitation period under the
+  law applicable to you (§14), and nothing here shortens it.
+
+  Where any applicable unclaimed-property or similar law requires us to report,
+  remit or otherwise deal with a dormant balance, we will follow that law, using
+  the last address we hold for you.
 
 ## 8. Disputes
 
